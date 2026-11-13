@@ -4,7 +4,8 @@ from pathlib import Path
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-PACKAGE = ROOT / 'releases/CinnamonCoffee-live-voices.zip'
+PACKAGE = ROOT / 'releases/CinnamonCoffee-voice-fix-1.1.zip'
+LATEST = ROOT / 'releases/CinnamonCoffee-live-voices.zip'
 
 
 def main():
@@ -14,6 +15,7 @@ def main():
     assert not (ROOT / 'Mod/scripts/CinnamonCoffee.cs').exists(), 'Do not package duplicate scripts'
     files = {str(p.relative_to(ROOT / 'Mod')).replace('\\', '/'): p.read_bytes() for p in sources}
     files['README_PL.md'] = (ROOT / 'README.md').read_bytes()
+    files['Install-CinnamonCoffee.ps1'] = (ROOT / 'scripts/Install-CinnamonCoffee.ps1').read_bytes()
     PACKAGE.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(PACKAGE, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
         for name, data in sorted(files.items()):
@@ -26,6 +28,7 @@ def main():
         assert set(archive.namelist()) == set(files)
         for name, data in files.items():
             assert archive.read(name) == data, name
+    LATEST.write_bytes(PACKAGE.read_bytes())
     print(f'Verified package: {PACKAGE} ({PACKAGE.stat().st_size} bytes, {len(files)} files)')
 
 

@@ -5504,6 +5504,8 @@ namespace CinnamonCoffee
             string normalized = NormalizePartnerVoice(name);
             if (normalized == null) return;
             partnerVoice = normalized;
+            _voiceAwaitingReadback = false;
+            _voiceApplyRetryAt = 0;
             _pendingPartnerVoiceChange = hasGirl && girl != null && girl.Exists();
             ApplyPendingPartnerVoice();
             SaveSettings();
@@ -5539,14 +5541,18 @@ namespace CinnamonCoffee
 
         private void DrawPartnerVoiceMenu(float x, ref float y, float lh)
         {
-            DrawSectionHeader("PARTNER VOICE", x, ref y);
+            DrawSectionHeader("PARTNER VOICE - FIX " + VOICE_FIX_VERSION, x, ref y);
             PartnerVoiceEntry selected = _partnerVoices.Find(v => v.Name == partnerVoice);
             DrawMenuText("Selected: " + (selected == null ? "AUTOMATIC" : selected.Label),
                 x + 0.007f, y, 0.202f, 0.25f, false, 220, 220, 220, 255);
             y += lh;
+            PartnerVoiceEntry active = _partnerVoices.Find(v => v.Name == _appliedPartnerVoice);
+            DrawMenuText("Confirmed: " + (active == null ? "AUTOMATIC" : active.Label),
+                x + 0.007f, y, 0.202f, 0.23f, false, 170, 230, 170, 255);
+            y += lh;
             if (_pendingPartnerVoiceChange)
             {
-                DrawMenuText("Waiting for current line to finish...", x + 0.007f, y, 0.202f, 0.23f, false, 255, 220, 120, 255);
+                DrawMenuText(_voiceAwaitingReadback ? "Confirming voice in game..." : "Waiting for current line to finish...", x + 0.007f, y, 0.202f, 0.23f, false, 255, 220, 120, 255);
                 y += lh;
             }
             DrawMenuItem("Automatic (mod default)" + (partnerVoice.Length == 0 ? " ~g~[x]" : ""), 0, x, ref y, lh);
@@ -5558,7 +5564,22 @@ namespace CinnamonCoffee
             }
         }
         // PARTNER AUDIO SCHEDULER
-        private const int SPEECH_LAUNCH_GRACE_MS = 300;
+        private const string SCRIPT_VERSION = "1.1";
+        private const string VOICE_FIX_VERSION = SCRIPT_VERSION;
+        private const int SPEECH_LAUNCH_GRACE_MS = 600;
+        private const int SPEECH_END_QUIET_MS = 450;
+        private int _speechObservedPedHandle = 0;
+        private bool _speechObservedActive = false;
+        private bool _speechQuietStarted = false;
+        private int _speechQuietSince = 0;
+        private int _nextPartnerLoopSpeechAt = 0;
+        private bool _voiceAwaitingReadback = false;
+        private string _voiceExpectedName = null;
+        private string _appliedPartnerVoice = "";
+        private int _voiceApplyRetryAt = 0;
+        private bool _measuringMenu = false;
+        private int _customSoundBusyUntil = 0;
+        private string _queuedCustomSoundPath = null;
         private const Keys LIVE_VOICE_MENU_KEY = Keys.F6;
         private bool _pendingPartnerVoiceChange = false;
         private bool _liveVoiceMenu = false;
@@ -5572,10 +5593,38 @@ namespace CinnamonCoffee
         private bool IsPartnerSpeechBusy(Ped ped)
         {
             if (ped == null || !ped.Exists()) return false;
-            int elapsed = unchecked(Game.GameTime - _speechLaunchAt);
-            if (_speechLaunchPedHandle == ped.Handle && elapsed >= 0 && elapsed < SPEECH_LAUNCH_GRACE_MS)
+            int now = Game.GameTime;
+            // Other nearby peds must not erase the active partner's speech latch.
+            if (girl != null && girl.Exists() && ped.Handle != girl.Handle)
+                return Function.Call<bool>((Hash)0x729072355FA39EC9UL, ped);
+            if (_speechObservedPedHandle != ped.Handle)
+            {
+                _speechObservedPedHandle = ped.Handle;
+                _speechObservedActive = false;
+                _speechQuietStarted = false;
+            }
+            int elapsed = unchecked(now - _speechLaunchAt);
+            bool launching = _speechLaunchPedHandle == ped.Handle && elapsed >= 0 && elapsed < SPEECH_LAUNCH_GRACE_MS;
+            bool playing = Function.Call<bool>((Hash)0x729072355FA39EC9UL, ped); // IS_ANY_SPEECH_PLAYING
+            if (playing || launching)
+            {
+                _speechObservedActive = true;
+                _speechQuietStarted = false;
                 return true;
-            return Function.Call<bool>((Hash)0x729072355FA39EC9UL, ped); // IS_ANY_SPEECH_PLAYING
+            }
+            if (!_speechObservedActive) return false;
+            // A single false frame can occur between streamed parts of the same line.
+            if (!_speechQuietStarted)
+            {
+                _speechQuietStarted = true;
+                _speechQuietSince = now;
+                return true;
+            }
+            if (unchecked(now - _speechQuietSince) < SPEECH_END_QUIET_MS) return true;
+            _speechObservedActive = false;
+            _speechQuietStarted = false;
+            _nextPartnerLoopSpeechAt = now + VOICE_INTERVAL;
+            return false;
         }
 
         private bool HasQueuedPartnerSpeech()
@@ -5608,26 +5657,48 @@ namespace CinnamonCoffee
         private void ApplyPendingPartnerVoice()
         {
             if (!_pendingPartnerVoiceChange || girl == null || !girl.Exists() || IsPartnerSpeechBusy(girl)) return;
+            int now = Game.GameTime;
+            if (_voiceAwaitingReadback)
+            {
+                uint actual = Function.Call<uint>((Hash)0x5E203DA2BA15D436UL, girl);
+                uint expected = string.IsNullOrEmpty(_voiceExpectedName) ? actual
+                    : Function.Call<uint>(Hash.GET_HASH_KEY, _voiceExpectedName);
+                if (actual == expected)
+                {
+                    _voiceAwaitingReadback = false;
+                    _pendingPartnerVoiceChange = false;
+                    _appliedPartnerVoice = partnerVoice;
+                    if (partnerVoice.Length == 0)
+                    {
+                        _voiceOverridePedHandle = 0;
+                        _nativeVoiceBeforeOverride = null;
+                    }
+                    return;
+                }
+                if (now < _voiceApplyRetryAt) return;
+                _voiceAwaitingReadback = false;
+            }
             bool wasOverridden = _voiceOverridePedHandle == girl.Handle;
-            _pendingPartnerVoiceChange = false;
+            _pendingPartnerVoiceChange = false; // Allow the original resolver to run without recursion.
             _girlCurrentVoice = null;
+            string restored = null;
             if (partnerVoice.Length == 0 && wasOverridden && !aLifeMode && IsOriginalHookerModel(girl))
             {
-                string original = _nativeVoiceBeforeOverride;
-                if (original == null)
+                restored = _nativeVoiceBeforeOverride;
+                if (restored == null)
                 {
                     int model = girl.Model.Hash;
-                    original = model == Function.Call<int>(Hash.GET_HASH_KEY, "s_f_y_hooker_01") ? HOOKER_VOICES[0]
+                    restored = model == Function.Call<int>(Hash.GET_HASH_KEY, "s_f_y_hooker_01") ? HOOKER_VOICES[0]
                         : model == Function.Call<int>(Hash.GET_HASH_KEY, "s_f_y_hooker_02") ? HOOKER_VOICES[3] : HOOKER_VOICES[6];
                 }
-                Function.Call(Hash.SET_AMBIENT_VOICE_NAME, girl, original);
+                Function.Call(Hash.SET_AMBIENT_VOICE_NAME, girl, restored);
             }
             AssignHookerVoice(girl);
-            if (partnerVoice.Length == 0)
-            {
-                _voiceOverridePedHandle = 0;
-                _nativeVoiceBeforeOverride = null;
-            }
+            _voiceExpectedName = partnerVoice.Length > 0 ? partnerVoice : restored ?? _girlCurrentVoice;
+            _pendingPartnerVoiceChange = true;
+            _voiceAwaitingReadback = true;
+            _voiceApplyRetryAt = now + 500;
+            // Confirm on the following tick: SET_AMBIENT_VOICE_NAME may be asynchronous.
         }
 
         private void TickPartnerAudio()
@@ -5637,8 +5708,11 @@ namespace CinnamonCoffee
                 ResetPartnerAudio();
                 return;
             }
+            IsPartnerSpeechBusy(girl); // Observe the entire lifecycle, even when no request is pending.
+            if (!_pendingPartnerVoiceChange && partnerVoice != _appliedPartnerVoice)
+                _pendingPartnerVoiceChange = true; // Also verify a selection restored from cfg/new partner.
             ApplyPendingPartnerVoice();
-            if (_queuedSpeechName == null) return;
+            if (_pendingPartnerVoiceChange || _queuedSpeechName == null) return;
             if (!HasQueuedPartnerSpeech())
             {
                 _queuedSpeechName = null;
@@ -5699,10 +5773,18 @@ namespace CinnamonCoffee
         private void ResetPartnerAudio()
         {
             _pendingPartnerVoiceChange = false;
+            _queuedCustomSoundPath = null;
             _queuedSpeechPed = null;
             _queuedSpeechName = null;
             _speechLaunchPedHandle = 0;
             _speechLaunchAt = 0;
+            _speechObservedPedHandle = 0;
+            _speechObservedActive = false;
+            _speechQuietStarted = false;
+            _nextPartnerLoopSpeechAt = 0;
+            _voiceAwaitingReadback = false;
+            _voiceExpectedName = null;
+            _appliedPartnerVoice = "";
             CloseLiveVoiceMenu();
         }
         // END PARTNER AUDIO SCHEDULER
@@ -6654,12 +6736,12 @@ namespace CinnamonCoffee
                 else if (menuLevel == MenuLevel.Settings)
                 {
                     menuLevel = MenuLevel.Main;
-                    menuIndex = hasGirl ? 5 : 3; // Restore cursor to "Settings" item
+                    menuIndex = hasGirl ? 6 : 4; // Restore cursor to "Settings" item
                 }
                 else if (menuLevel == MenuLevel.Compatibility)
                 {
                     menuLevel = MenuLevel.Main;
-                    menuIndex = hasGirl ? 6 : 4; // Restore cursor to "Cowgirl Anim by Sinkra" item
+                    menuIndex = hasGirl ? 7 : 5; // Restore cursor to "Cowgirl Anim by Sinkra" item
                 }
                 else if (menuLevel == MenuLevel.Approach)
                 {
@@ -6923,12 +7005,12 @@ namespace CinnamonCoffee
                     else if (menuLevel == MenuLevel.Settings)
                     {
                         menuLevel = MenuLevel.Main;
-                        menuIndex = hasGirl ? 4 : 3; // Restore cursor to "Settings" item
+                        menuIndex = hasGirl ? 6 : 4; // Restore cursor to "Settings" item
                     }
                     else if (menuLevel == MenuLevel.Compatibility)
                     {
                         menuLevel = MenuLevel.Main;
-                        menuIndex = hasGirl ? 5 : 4; // Restore cursor to "Cowgirl Anim by Sinkra" item
+                        menuIndex = hasGirl ? 7 : 5; // Restore cursor to "Cowgirl Anim by Sinkra" item
                     }
                     else if (menuLevel == MenuLevel.Approach)
                     {
@@ -7126,7 +7208,7 @@ namespace CinnamonCoffee
             {
                 // hasGirl: Actions/Services, Leave/Dismiss, Teleport, AI Mode, Game Mode, Settings>, Sinkra, Token, Bridge (9)
                 // no girl: Search, AI Mode, Game Mode, Settings>, Sinkra, Token, Bridge (7)
-                return hasGirl ? 9 : 7;
+                return hasGirl ? 10 : 8;
             }
             else if (menuLevel == MenuLevel.SandboxCar)
             {
@@ -7303,21 +7385,25 @@ namespace CinnamonCoffee
                         case 4: // Game Mode
                             if (!(hasGirl && aLifeMode)) { sandboxMode = !sandboxMode; SaveSettings(); }
                             break;
-                        case 5: // Settings >
+                        case 5: // Partner Voice >
+                            menuLevel = MenuLevel.PartnerVoices;
+                            menuIndex = 0;
+                            break;
+                        case 6: // Settings >
                             menuLevel = MenuLevel.Settings;
                             menuIndex = 0;
                             break;
-                        case 6: // Sinkra
+                        case 7: // Sinkra
                             if (_sinkraCowgirlAvailable)
                             { menuLevel = MenuLevel.Compatibility; menuIndex = 0; }
                             else
                                 ShowHudStatus("~r~ADDON NOT INSTALLED!", 2000);
                             break;
-                        case 7: // Autoblow Token
+                        case 8: // Autoblow Token
                             Function.Call(Hash.DISPLAY_ONSCREEN_KEYBOARD, true, "FMMC_KEY_TIP8", "", deviceToken, "", "", "", 64);
                             tokenKeyboardOpen = true;
                             break;
-                        case 8: // Device Bridge — 3-way: reconnect / disconnect / check
+                        case 9: // Device Bridge — 3-way: reconnect / disconnect / check
                             if (_telemetry.IsHardDisconnected)
                             {
                                 _telemetry.Reconnect();
@@ -7357,21 +7443,25 @@ namespace CinnamonCoffee
                         case 2: // Game Mode
                             if (!(hasGirl && aLifeMode)) { sandboxMode = !sandboxMode; SaveSettings(); }
                             break;
-                        case 3: // Settings >
+                        case 3: // Partner Voice >
+                            menuLevel = MenuLevel.PartnerVoices;
+                            menuIndex = 0;
+                            break;
+                        case 4: // Settings >
                             menuLevel = MenuLevel.Settings;
                             menuIndex = 0;
                             break;
-                        case 4: // Sinkra — open Compatibility sub-menu (only if installed)
+                        case 5: // Sinkra — open Compatibility sub-menu (only if installed)
                             if (_sinkraCowgirlAvailable)
                             { menuLevel = MenuLevel.Compatibility; menuIndex = 0; }
                             else
                                 ShowHudStatus("~r~ADDON NOT INSTALLED!", 2000);
                             break;
-                        case 5: // Autoblow Token — open GTA on-screen keyboard
+                        case 6: // Autoblow Token — open GTA on-screen keyboard
                             Function.Call(Hash.DISPLAY_ONSCREEN_KEYBOARD, true, "FMMC_KEY_TIP8", "", deviceToken, "", "", "", 64);
                             tokenKeyboardOpen = true;
                             break;
-                        case 6: // Device Bridge — 3-way: reconnect / disconnect / check
+                        case 7: // Device Bridge — 3-way: reconnect / disconnect / check
                             if (_telemetry.IsHardDisconnected)
                             {
                                 _telemetry.Reconnect();
@@ -9762,6 +9852,7 @@ namespace CinnamonCoffee
         private void OnTick(object sender, EventArgs e)
         {
             _telemetry.Poll(); // drain pong datagrams on the game thread (non-blocking)
+            TickCustomSound();
             TickPartnerAudio(); // Apply a requested voice only between complete speech lines.
             TickPostSexVoice(); // post-sex voice: poll IS_AMBIENT_SPEECH_PLAYING → 1s delay → HOOKER_OFFER_AGAIN + reopen menu
 
@@ -10128,7 +10219,10 @@ namespace CinnamonCoffee
             if (hasGirl && girl != null && girl.Exists() && _girlCurrentVoice != null
                 && Game.GameTime >= _voiceReapplyAt && !IsPartnerSpeechBusy(girl) && !_pendingPartnerVoiceChange)
             {
-                Function.Call(Hash.SET_AMBIENT_VOICE_NAME, girl, _girlCurrentVoice);
+                uint actualVoice = Function.Call<uint>((Hash)0x5E203DA2BA15D436UL, girl);
+                uint expectedVoice = Function.Call<uint>(Hash.GET_HASH_KEY, _girlCurrentVoice);
+                if (actualVoice != expectedVoice)
+                    Function.Call(Hash.SET_AMBIENT_VOICE_NAME, girl, _girlCurrentVoice);
                 _voiceReapplyAt = Game.GameTime + 3000;
             }
             // ── Periodic facial expression reapplication (GTA can reset idle face anims) ──
@@ -10196,7 +10290,7 @@ namespace CinnamonCoffee
             if (_hudStatusText != null)
             {
                 if (Game.GameTime < _hudStatusExpireAt)
-                    DrawTextOnScreen(_hudStatusText, 0.5f, 0.895f, 0.45f, true);
+                    DrawTextOnScreen(_hudStatusText, 0.5f, 0.865f, 0.30f, true);
                 else
                     _hudStatusText = null;
             }
@@ -10824,21 +10918,22 @@ namespace CinnamonCoffee
 
             // Animation speed controls request cadence, never the duration of a speech line.
             int now = Game.GameTime;
-            int voiceInterval = (int)(VOICE_INTERVAL / (1.0 + (animSpeed - 1.0) * 0.55));
-            if (currentAction != "" && animPhase == 2 && animSpeed > 0f && now - lastVoiceTime > voiceInterval
+            if (currentAction != "" && animPhase == 2 && animSpeed > 0f && now >= _nextPartnerLoopSpeechAt
                 && !_bjThroatPending && _throatLockAt == 0 && !_throatSpeedLocked
-                && !IsPartnerSpeechBusy(girl) && !HasQueuedPartnerSpeech() && now >= _bjSoundBusyUntil)
+                && !IsPartnerSpeechBusy(girl) && !_pendingPartnerVoiceChange && !HasQueuedPartnerSpeech() && now >= _bjSoundBusyUntil)
             {
                 PlayMoaningSounds(); // GTA ambient speech
                 lastVoiceTime = now;
+                _nextPartnerLoopSpeechAt = now + VOICE_INTERVAL;
             }
 
             // Custom BJ sounds — separate, faster timer (runs alongside GTA speech)
-            if (bjSoundsEnabled && currentAction == "blowjob" && animPhase == 2 && animSpeed > 0f && _bjSuckFiles != null)
+            if (bjSoundsEnabled && currentAction == "blowjob" && animPhase == 2 && animSpeed > 0f && _bjSuckFiles != null
+                && !_bjThroatPending && _throatLockAt == 0 && !_throatSpeedLocked)
             {
                 int bjInterval = (int)(BJ_SOUND_INTERVAL / (1.0 + (animSpeed - 1.0) * 0.55));
                 bool gtaSpeechActive = IsPartnerSpeechBusy(girl) || HasQueuedPartnerSpeech() || _pendingPartnerVoiceChange;
-                if (!gtaSpeechActive && now - _lastBjSoundTime > bjInterval && now >= _bjSoundBusyUntil)
+                if (!gtaSpeechActive && now - _lastBjSoundTime > bjInterval && now >= _bjSoundBusyUntil && now >= _customSoundBusyUntil)
                 {
                     // Look up (or compute) this woman's throat chance from her Confidence trait.
                     // In A-Life mode: use PersonalityProfile.Confidence (persisted to cache).
@@ -10898,10 +10993,10 @@ namespace CinnamonCoffee
             }
 
             // BJThroat follow-up: play BJThroat.wav after BJThroat_Intro.wav finishes
-            if (_bjThroatPending && now >= _bjThroatAt)
+            if (_bjThroatPending && now >= _bjThroatAt && now >= _customSoundBusyUntil)
             {
                 _bjThroatPending = false;
-                PlayBjCustom(_bjThroatFile, true); // force=true: chains immediately after intro
+                PlayBjCustom(_bjThroatFile); // Preserve the full intro before starting the next clip.
                 int throatDur = _soundDurations.ContainsKey(_bjThroatFile) ? _soundDurations[_bjThroatFile] : 8000;
                 _throatLockAt        = now + 1000;            // lock speed 1s after main WAV starts
                 _throatSequenceEndAt = now + throatDur + 300; // 300ms buffer after WAV ends
@@ -11619,13 +11714,7 @@ namespace CinnamonCoffee
                 }
 
                 string speedDisplay = (_bjThroatPending || _throatLockAt > 0 || _throatSpeedLocked) ? "THROATING..." : animSpeed.ToString("0.00") + "x";
-                if (showTutorialMessages)
-                {
-                    string voiceShortcut = _usingController ? masterControlModifierDisplay + "+~INPUT_FRONTEND_Y~" : "F6";
-                    string actionHint = _liveVoiceMenu ? "CLOSE VOICE MENU" : "FINISH";
-                    DrawTextOnScreen("~b~[" + MasterDisplay + "]~s~ " + actionHint + " | ~b~[" + voiceShortcut
-                        + "]~s~ VOICE | ~b~[" + SpeedDownDisplay + "/" + SpeedUpDisplay + "]~s~ SPEED [" + speedDisplay + "]", 0.5f, 0.920f, 0.45f, true);
-                }
+                if (showTutorialMessages) DrawAnimationControls(speedDisplay);
             }
 
             // The live voice overlay consumes its close button without finishing the animation.
@@ -17090,7 +17179,7 @@ namespace CinnamonCoffee
 
         private void ApplyMoodFacialExpression(Ped ped, string mood)
         {
-            if (!aLifeMode || ped == null || !ped.Exists() || mood == null) return;
+            if (!aLifeMode || ped == null || !ped.Exists() || mood == null || IsPartnerSpeechBusy(ped)) return;
             string animName;
             if      (mood == "Relaxed") animName = "mood_normal_1";
             else if (mood == "Happy")   animName = "mood_happy_1";
@@ -17109,20 +17198,20 @@ namespace CinnamonCoffee
         private void PlayPedSpeech(Ped ped, string speechName)
         {
             if (ped == null || !ped.Exists()) return;
-            if (IsPartnerSpeechBusy(ped) || _bjThroatPending || _throatLockAt != 0 || _throatSpeedLocked)
+            if (IsPartnerSpeechBusy(ped) || _pendingPartnerVoiceChange || _bjThroatPending || _throatLockAt != 0 || _throatSpeedLocked)
             { QueuePartnerSpeech(ped, speechName); return; }
             if (girl != null && ped.Handle == girl.Handle) AssignHookerVoice(ped);
-            Function.Call(Hash.SET_AUDIO_FLAG, "IsDirectorModeActive", true);
-            try
-            {
-                if (!string.IsNullOrEmpty(_girlCurrentVoice))
-                    Function.Call((Hash)0x3523634255FC3318L, ped, speechName, _girlCurrentVoice, "SPEECH_PARAMS_FORCE_SHOUTED", 0);
-                else
-                    Function.Call(Hash.PLAY_PED_AMBIENT_SPEECH_NATIVE, ped, speechName, "SPEECH_PARAMS_FORCE_SHOUTED", 0);
-                _speechLaunchPedHandle = ped.Handle;
-                _speechLaunchAt = Game.GameTime;
-            }
-            finally { Function.Call(Hash.SET_AUDIO_FLAG, "IsDirectorModeActive", false); }
+            // Explicitly select the requested bank; never FORCE a replacement over engine audio.
+            string voice = !string.IsNullOrEmpty(partnerVoice) ? partnerVoice : _girlCurrentVoice;
+            if (!string.IsNullOrEmpty(voice))
+                Function.Call((Hash)0x3523634255FC3318L, ped, speechName, voice, "SPEECH_PARAMS_ALLOW_REPEAT", 0);
+            else
+                Function.Call(Hash.PLAY_PED_AMBIENT_SPEECH_NATIVE, ped, speechName, "SPEECH_PARAMS_ALLOW_REPEAT", 0);
+            _speechLaunchPedHandle = ped.Handle;
+            _speechLaunchAt = Game.GameTime;
+            _speechObservedPedHandle = ped.Handle;
+            _speechObservedActive = true;
+            _speechQuietStarted = false;
         }
 
         /// <summary>Play ambient speech moaning sounds on the girl.</summary>
@@ -17249,20 +17338,33 @@ namespace CinnamonCoffee
         /// Play a custom BJ WAV file asynchronously from the pre-loaded volume-adjusted buffer.
         /// Skips if another custom sound is already playing, unless <paramref name="force"/> is true.
         /// </summary>
+        private void TickCustomSound()
+        {
+            if (_queuedCustomSoundPath == null || Game.GameTime < _customSoundBusyUntil) return;
+            string path = _queuedCustomSoundPath;
+            _queuedCustomSoundPath = null;
+            PlayBjCustom(path);
+        }
+
         private void PlayBjCustom(string path, bool force = false)
         {
             if (path == null) return;
+            if (Game.GameTime < _customSoundBusyUntil)
+            {
+                if (force && _bjWavData.ContainsKey(path)) _queuedCustomSoundPath = path;
+                return;
+            }
             byte[] data;
             if (!_bjWavData.TryGetValue(path, out data)) return;
-            if (!force && Game.GameTime < _bjSoundBusyUntil) return;
             try
             {
                 if (_bjPlayer == null) _bjPlayer = new System.Media.SoundPlayer();
-                _bjPlayer.Stop();
                 _bjPlayer.Stream = new System.IO.MemoryStream(data);
-                _bjPlayer.Play(); // async — never blocks the game thread
+                _bjPlayer.Load();
+                _bjPlayer.Play();
                 int dur = _soundDurations.ContainsKey(path) ? _soundDurations[path] : 3000;
-                _bjSoundBusyUntil = Game.GameTime + dur;
+                _customSoundBusyUntil = Game.GameTime + dur + 50;
+                _bjSoundBusyUntil = _customSoundBusyUntil;
             }
             catch { }
         }
@@ -17299,32 +17401,38 @@ namespace CinnamonCoffee
             }
         }
 
-        /// <summary>Play a sex slap WAV. No overlap guard — fires and forgets on its own player.</summary>
+        /// <summary>Play an effect only after the shared WinMM WAV channel becomes idle.</summary>
         private void PlaySlapSound(string path)
         {
+            if (path == null || Game.GameTime < _customSoundBusyUntil) return;
             byte[] data;
             if (!_bjWavData.TryGetValue(path, out data)) return;
             try
             {
                 if (_slapPlayer == null) _slapPlayer = new System.Media.SoundPlayer();
-                _slapPlayer.Stop();
                 _slapPlayer.Stream = new System.IO.MemoryStream(data);
+                _slapPlayer.Load();
                 _slapPlayer.Play();
+                int dur = _soundDurations.ContainsKey(path) ? _soundDurations[path] : 3000;
+                _customSoundBusyUntil = Game.GameTime + dur + 50;
             }
             catch { }
         }
 
-        /// <summary>Play a kissing WAV on its own dedicated player.</summary>
+        /// <summary>Play a kissing WAV without replacing another active WAV.</summary>
         private void PlayKissSound(string path)
         {
+            if (path == null || Game.GameTime < _customSoundBusyUntil) return;
             byte[] data;
             if (!_bjWavData.TryGetValue(path, out data)) return;
             try
             {
                 if (_kissPlayer == null) _kissPlayer = new System.Media.SoundPlayer();
-                _kissPlayer.Stop();
                 _kissPlayer.Stream = new System.IO.MemoryStream(data);
+                _kissPlayer.Load();
                 _kissPlayer.Play();
+                int dur = _soundDurations.ContainsKey(path) ? _soundDurations[path] : 3000;
+                _customSoundBusyUntil = Game.GameTime + dur + 50;
             }
             catch { }
         }
@@ -18311,6 +18419,16 @@ namespace CinnamonCoffee
         }
 
         /// <summary>Draw the selection menu on screen.</summary>
+        private void DrawAnimationControls(string speedDisplay)
+        {
+            string voiceShortcut = _usingController ? masterControlModifierDisplay + "+~INPUT_FRONTEND_Y~" : "F6";
+            string actionHint = _liveVoiceMenu ? "CLOSE VOICE MENU" : "FINISH";
+            DrawTextOnScreen("[" + MasterDisplay + "] " + actionHint + "   [" + voiceShortcut + "] PARTNER VOICE",
+                0.5f, 0.925f, 0.30f, true);
+            DrawTextOnScreen("[" + SpeedDownDisplay + "/" + SpeedUpDisplay + "] SPEED   [" + SpeedResetDisplay
+                + "] RESET   " + speedDisplay, 0.5f, 0.955f, 0.30f, true);
+        }
+
         private void DrawMenu()
         {
             // Clamp menuIndex when dynamic items disappear (e.g. vehicle drives away)
@@ -18325,11 +18443,11 @@ namespace CinnamonCoffee
             const float PAD    = 0.007f;
             const float LH     = 0.034f;
 
-            // ── Pass 1: measure actual content height by drawing items ──────────
-            // Items are drawn here but will be immediately covered by the background
-            // rect in Pass 2, then redrawn correctly on top in Pass 3.
+            // Measure layout without submitting native draw calls, then render once.
             float yMeasure = TOP + HDR_H + 0.016f;
-            DispatchDrawMenu(PX, ref yMeasure, LH);
+            _measuringMenu = true;
+            try { DispatchDrawMenu(PX, ref yMeasure, LH); }
+            finally { _measuringMenu = false; }
 
             bool showSwipe = IsInServiceSubMenu() && !sandboxMode;
             bool showAmt   = menuLevel == MenuLevel.GiveMoney;
@@ -18344,7 +18462,7 @@ namespace CinnamonCoffee
 
             // ── Header title "CINNAMON COFFEE" — vertically centered in the header bar ──
             float hdrTextY = TOP + (HDR_H * 0.5f) - 0.014f;
-            DrawMenuText("CINNAMON COFFEE", PX + PAD, hdrTextY, W - PAD * 2f, 0.50f, true, 210, 125, 45, 255, 7);
+            DrawMenuText("CINNAMON COFFEE 1.1", PX + PAD, hdrTextY, W - PAD * 2f, 0.38f, true, 210, 125, 45, 255, 7);
 
             // ── Pass 3: redraw items on top of background ────────────────────────
             float y = TOP + HDR_H + 0.016f;
@@ -19203,6 +19321,7 @@ namespace CinnamonCoffee
                 ? "~c~Game Mode: " + (sandboxMode ? "Casual" : "Prostitution") + "~s~"
                 : "Game Mode: " + (sandboxMode ? "~b~Casual~s~" : "~o~Prostitution~s~");
             DrawMenuItem(gameModeLabel, idx, x, ref y, lh); idx++;
+            DrawMenuItem("Partner Voice ~b~[>]~s~", idx, x, ref y, lh); idx++;
             DrawMenuItem("Settings ~b~[>]~s~", idx, x, ref y, lh); idx++;
 
             // ── ADDONS ─────────────────────────────────────────────
@@ -19477,6 +19596,7 @@ namespace CinnamonCoffee
 
         private void DrawMenuRect(float x, float y, float w, float h, int r, int g, int b, int a)
         {
+            if (_measuringMenu) return;
             Function.Call(Hash.DRAW_RECT, x + w * 0.5f, y + h * 0.5f, w, h, r, g, b, a, false);
         }
 
@@ -19487,6 +19607,7 @@ namespace CinnamonCoffee
 
         private void DrawMenuText(string text, float x, float y, float w, float scale, bool centered, int r, int g, int b, int a, int font)
         {
+            if (_measuringMenu) return;
             Function.Call(Hash.SET_TEXT_FONT, font);
             Function.Call(Hash.SET_TEXT_SCALE, scale, scale);
             Function.Call(Hash.SET_TEXT_COLOUR, r, g, b, a);
@@ -19562,6 +19683,7 @@ namespace CinnamonCoffee
         /// <summary>Draw text on screen using GTA V natives.</summary>
         private void DrawTextOnScreen(string text, float x, float y)
         {
+            if (_measuringMenu) return;
             Function.Call(Hash.SET_TEXT_FONT, 0);
             Function.Call(Hash.SET_TEXT_SCALE, 0.4f, 0.4f);
             Function.Call(Hash.SET_TEXT_COLOUR, 255, 255, 255, 255);
@@ -19581,6 +19703,7 @@ namespace CinnamonCoffee
 
         private void DrawTextOnScreen(string text, float x, float y, float scale, bool centered)
         {
+            if (_measuringMenu) return;
             Function.Call(Hash.SET_TEXT_FONT, 0);
             Function.Call(Hash.SET_TEXT_SCALE, scale, scale);
             Function.Call(Hash.SET_TEXT_COLOUR, 255, 255, 255, 255);
