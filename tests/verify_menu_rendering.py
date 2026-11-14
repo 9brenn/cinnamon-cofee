@@ -40,6 +40,8 @@ signatures += [
     'private void DrawTextOnScreen(string text, float x, float y)',
     'private void DrawTextOnScreen(string text, float x, float y, float scale, bool centered)',
 ]
+if 'private bool HasSimpleFinishMenu()' in source:
+    signatures.append('private bool HasSimpleFinishMenu()')
 methods='\n'.join(method(s) for s in signatures)
 hud_call = re.search(r'DrawTextOnScreen\(_hudStatusText,\s*0\.5f,\s*[0-9.]+f,\s*[0-9.]+f,\s*true\);', source).group(0)
 if 'private void DrawAnimationControls(' in source:
@@ -116,7 +118,7 @@ class Harness {
     private int _throatLockAt; private float animSpeed=3f;
     private string _hudStatusText="VOICE CHANGED",masterControlModifierDisplay="LB";
     private MenuLevel menuLevel; private int menuIndex,_convSelectedBranch,_intimacySelectedBranch,_leaveSelectedCluster,pingPendingTime;
-    private string _currentGirlKey,deviceToken="";
+    private string _currentGirlKey,deviceToken="",currentAction="standing";
     private Ped _approachCandidate; private Mode mode;
     private string[] carServiceItems=new string[2],standingServiceLabels=new string[5],sittingServiceLabels=new string[4],layingServiceLabels=new string[3];
     private const string SCRIPT_VERSION="1.1"; private const string MenuUpDisplay="UP",MenuDownDisplay="DOWN",MenuSelectDisplay="SELECT",MenuBackDisplay="BACK",MasterDisplay="J",SpeedDownDisplay="NUM4",SpeedUpDisplay="NUM6",SpeedResetDisplay="NUM1";
@@ -179,7 +181,7 @@ refs=sorted((dotnet.parent/'packs/Microsoft.NETCore.App.Ref').glob('*/ref/net8.0
 runtime=sorted((dotnet.parent/'shared/Microsoft.NETCore.App').iterdir())[-1].name
 with tempfile.TemporaryDirectory(prefix='cinnamon-render-tests-') as directory:
     temp=Path(directory);cs=temp/'RenderTests.cs';dll=temp/'RenderTests.dll'
-    cs.write_text('enum Hash { '+','.join(hash_names)+' }\n'+mocks+menu_enum+methods+back_methods+stubs+tests)
+    cs.write_text('enum Hash { '+','.join(hash_names)+' }\n'+mocks.replace('SCRIPT_VERSION="1.1"','SCRIPT_VERSION="'+re.search(r'private const string SCRIPT_VERSION = "([^"]+)"',source).group(1)+'"')+menu_enum+methods+back_methods+stubs+tests)
     # using directives must precede type declarations.
     cs.write_text(cs.read_text().replace('enum Hash { '+','.join(hash_names)+' }\n','').replace('class Ped {','enum Hash { '+','.join(hash_names)+' }\nclass Ped {',1))
     rsp=temp/'refs.rsp';rsp.write_text('\n'.join('/r:'+str(p) for p in refs.glob('*.dll')))

@@ -1,4 +1,4 @@
-# CinnamonCoffee 1.1 — poprawki głosu, menu i odtwarzania
+# CinnamonCoffee 1.2 — regularne dialogi i niezależne kanały WAV
 
 Wersja przygotowana na podstawie przesłanego kodu CinnamonCoffee. Zawiera
 8 istniejących kobiecych głosów postaci `S_F_Y_HOOKER` z GTA V oraz 31 przesłanych
@@ -6,7 +6,7 @@ plików WAV. Nagrania pozostają niezmienione; nie dodano nowych głosów AI.
 
 ## Pobieranie
 
-Gotowa paczka instalacyjna: [CinnamonCoffee-voice-fix-1.1.zip](releases/CinnamonCoffee-voice-fix-1.1.zip).
+Gotowa paczka instalacyjna: [CinnamonCoffee-voice-fix-1.2.zip](releases/CinnamonCoffee-voice-fix-1.2.zip).
 Na stronie pliku ZIP wybierz **Download raw file**, aby pobrać archiwum.
 
 ## Co poprawiono
@@ -14,26 +14,38 @@ Na stronie pliku ZIP wybierz **Download raw file**, aby pobrać archiwum.
 - Menu wyboru głosu można otworzyć podczas trwającej pętli animacji. Animacja
   kontynuuje działanie z dotychczasową szybkością.
 - **Partner Voice** ma bezpośrednią pozycję w menu głównym i pozostaje także
-  w **Settings**. Menu pokazuje osiem głosów i numer wersji **1.1**.
+  w **Settings**. Menu pokazuje osiem głosów i numer wersji **1.2**.
 - Zmiana głosu czeka na naturalny koniec bieżącej wypowiedzi. Kilka kolejnych
   wyborów zastępuje oczekujący wybór; obowiązuje ostatni.
-- Interfejs odróżnia wybrany głos od głosu potwierdzonego przez silnik gry.
-  Potwierdzenie następuje w następnej klatce; odrzucone przypisanie jest ponawiane.
+- Wybrany bank jest przekazywany bezpośrednio przy rozpoczynaniu każdej kwestii.
+  Odczyt hasha ambientowego głosu jest wyłącznie diagnostyczny: najwyżej trzy
+  próby i brak blokowania dialogów, nawet gdy silnik nie potwierdzi zmiany.
 - Nowa kwestia nie zatrzymuje poprzedniej przy wyższym tempie. Skrypt sprawdza
   rzeczywiste odtwarzanie mowy, ochronę uruchamiania i 450 ms ciągłej ciszy.
-  Okres kolejnej wypowiedzi wynosi siedem sekund od potwierdzonego końca
-  poprzedniej i nie zależy od prędkości animacji. Wywołania nie używają parametrów FORCE.
+  Następna kwestia otrzymuje jedną losową przerwę **2–5 sekund**, liczoną od końca
+  poprzedniej. Prędkość animacji nie skraca nagrania. Wywołania nie używają FORCE.
+- Skrypt odróżnia żądanie mowy od potwierdzonego rozpoczęcia. Odrzucone żądanie
+  dostaje krótką próbę ponowienia; nie jest uznawane za ukończoną wypowiedź.
+  Przywrócono flagę audio Director Mode na czas interakcji, aby unikać dodatkowych
+  ograniczeń częstotliwości ambientowych dialogów GTA; reset przywraca flagę.
+- Usunięto 1-procentową szansę mowy przy niskiej reputacji A-Life. Włączone dialogi
+  pozostają regularne; pozostałe mechanizmy reputacji nie są zmieniane.
 - Okresowe wypowiedzi nie gromadzą się w kolejce. Ważna wypowiedź, np. końcowa,
   może poczekać w jednym oczekującym żądaniu.
-- Automatyczne przełączanie głosu i dodatkowe efekty czekają na zakończenie
-  wypowiedzi. Sekwencja WAV nie odcina końcówki klipu wprowadzającego.
-- Wszystkie WAV-y współdzielą blokadę odtwarzania aż do końca klipu. Dzięki temu
-  interwał 180 ms nie zastępuje nagrania trwającego 400 ms. Priorytetowy efekt
-  może poczekać, a zaległe zwykłe efekty nie tworzą kolejki.
+- Mowa GTA i WAV-y nie blokują się wzajemnie. Zastąpiono globalny kanał
+  `SoundPlayer` niezależnymi strumieniami Windows `waveOut` dla pełnych klipów.
+  Odstępy uruchamiania efektów dostosowują się do prędkości animacji: np. klipy
+  400 ms mogą zaczynać się co 180 ms, nakładając się bez ucinania końcówek.
+  Zachowano naturalne brzmienie i czas trwania nagrań; pliki nie są przyspieszane
+  przez zmianę tonacji ani modyfikowane na dysku.
+- Sekwencja efektów na kanale BJ czeka tylko na własny klip, nie na głos postaci
+  ani efekty innych typów. Jednocześnie może grać do ośmiu pełnych WAV-ów.
 - Pomiar menu nie rysuje go drugi raz. Podpowiedzi są w dwóch krótkich wierszach,
   z osobnym miejscem na komunikat stanu.
-- Zamknięcie menu klawiszem J nie kończy animacji, również przy przytrzymaniu
-  klawisza. Zakończenie wymaga jego zwolnienia i ponownego naciśnięcia.
+- **J otwiera lub zamyka menu zakończenia**, bez zmiany zadań ani playheadów
+  żadnej postaci. Właściwe zakończenie zaczyna się dopiero po wyborze opcji.
+  Dotyczy to również pocałunków i facesitting. Podczas intro/outro J jest
+  ignorowane; przytrzymanie i powtarzanie klawisza nie anuluje aktorów.
 
 ## Instalacja
 
@@ -42,7 +54,7 @@ Na stronie pliku ZIP wybierz **Download raw file**, aby pobrać archiwum.
    lokalizację swojej gry:
 
    ```powershell
-   powershell -NoProfile -ExecutionPolicy Bypass -File .\Install-CinnamonCoffee.ps1 -GameFolder "D:\Games\Grand Theft Auto V"
+   powershell -NoProfile -ExecutionPolicy Bypass -File .\Install-CinnamonCoffee.ps1 -GameFolder "D:\Steam\steamapps\common\Grand Theft Auto V"
    ```
 
    Opcja `-ExecutionPolicy Bypass` dotyczy tylko tego uruchomienia PowerShell.
@@ -52,7 +64,7 @@ Na stronie pliku ZIP wybierz **Download raw file**, aby pobrać archiwum.
    `CinnamonCoffee.3.cs`. Zachowuje istniejącą konfigurację, A-Life i WAV-y.
    Kopie wewnątrz podfolderu `scripts` mogą nadal być uruchamiane przez SHVDN.
 4. Wymagane są ScriptHookV i ScriptHookVDotNet v3 zgodne z Twoją wersją GTA V.
-   Po uruchomieniu w nagłówku menu powinno być **CINNAMON COFFEE 1.1**.
+   Po uruchomieniu w nagłówku menu powinno być **CINNAMON COFFEE 1.2**.
    Jeżeli nadal widzisz stare podpowiedzi w jednym wierszu lub dwie nakładki,
    sprawdź, czy instalator wskazywał właściwy folder gry.
 
@@ -70,6 +82,7 @@ Mostek Autoblow jest opcjonalny i nie jest potrzebny do wyboru głosu.
 | Poprzednia / następna pozycja | NUM8 / NUM2 | góra / dół |
 | Wybierz głos | NUM5 | A / krzyżyk |
 | Zamknij menu i kontynuuj animację | NUM0, J lub F6 | B / kółko albo kombinacja otwierająca |
+| Otwórz/zamknij menu zakończenia bez przerywania pętli | J | dotychczasowa kombinacja przycisku głównego |
 
 Na padzie używany jest skonfigurowany `masterControlModifier` oraz przycisk Y
 (trójkąt). Własne przypisania nawigacji z pliku cfg nadal obowiązują.
@@ -90,19 +103,27 @@ oczekiwanie na koniec mowy, zmianę głosu, kolejkę, reset i menu.
 ```sh
 python3 tests/verify_partner_audio.py /ścieżka/do/dotnet
 python3 tests/verify_menu_rendering.py /ścieżka/do/dotnet
+python3 tests/verify_wave_engine.py /ścieżka/do/dotnet
+python3 tests/verify_finish_flow.py
 python3 tests/verify_installer.py /ścieżka/do/pwsh
 python3 scripts/build_release.py
 ```
 
 Testy wymagają .NET 8 SDK, Pythona 3 i PowerShell do sprawdzania instalatora.
 Testy renderowania przechwytują rzeczywiste wywołania rysujące z kodu;
-testy audio symulują opóźniony start i chwilowo fałszywy stan mowy.
+testy audio symulują opóźniony i odrzucony start, stały błędny hash głosu,
+krótkie przerwy w sygnale i losowanie odstępu raz po faktycznym końcu kwestii.
+Testy `waveOut` sprawdzają parser PCM, nakładanie pełnych klipów oraz czas życia
+buforów i sprzątanie urządzeń za pomocą symulowanego sterownika.
 Instalator sprawdzono na tymczasowych katalogach w PowerShell 7.4.6;
 używa składni zgodnej z Windows PowerShell 5.1.
 Testy nie zastępują odsłuchu i sprawdzenia
 sterowania w GTA V. Środowisko użyte do prac nie zawiera gry. Sam silnik,
 usunięcie postaci, anulowanie interakcji lub inny mod mogą nadal przerwać mowę.
-Nie zmieniono zawartości ani formatu przesłanych nagrań.
+Nie zmieniono zawartości ani formatu przesłanych nagrań. Nie uruchomiono tutaj
+rzeczywistego sterownika dźwięku Windows. Jeśli urządzenie odrzuci format audio
+albo silnik wielokrotnie nie rozpocznie żądanej kwestii, szczegóły są zapisywane
+w `scripts/CinnamonCoffeeAudio.log`.
 
 Kod i nagrania bazowe zostały dostarczone przez użytkownika. Zachowano nagłówek
 i informacje o autorach znajdujące się w kodzie; nie nadano im nowej licencji.

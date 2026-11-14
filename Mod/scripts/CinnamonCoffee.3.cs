@@ -530,7 +530,8 @@ namespace CinnamonCoffee
         private string    _bjPantsZipFile     = null;  // BJPantsZip.wav
         private readonly Dictionary<string,int>    _soundDurations = new Dictionary<string,int>();
         private readonly Dictionary<string,byte[]> _bjWavData      = new Dictionary<string,byte[]>(); // volume-adjusted WAV bytes
-        private System.Media.SoundPlayer _bjPlayer = null;
+        private readonly PcmWaveMixer _waveMixer = new PcmWaveMixer();
+        private int _lastWavePlaybackErrorAt = -10000;
         private int  _bjSoundBusyUntil  = 0;  // GameTime when the current custom BJ WAV finishes
         private int  _lastBjSoundTime   = 0;  // GameTime of last custom BJ WAV fired
         private bool _bjThroatPending   = false; // follow-up BJThroat.wav scheduled after BJThroat_Intro
@@ -543,10 +544,8 @@ namespace CinnamonCoffee
 
         // -- Slap & rumble state --
         private string[] _sexSlapFiles     = null;  // SexSlap_1..11.wav
-        private System.Media.SoundPlayer _slapPlayer   = null;
         private int  _lastSlapSoundTime = 0;  // GameTime of last slap sound fired
         private string[] _kissSoundFiles   = null;  // Kissing_1..5.wav
-        private System.Media.SoundPlayer _kissPlayer   = null;
         private int  _lastKissSoundTime    = 0;  // GameTime of last kiss sound fired
         private int  _lastRumbleTime     = 0;  // GameTime of last vibration pulse fired
         private bool _rumblePulseActive  = false; // true while the short ON burst is playing
@@ -651,6 +650,7 @@ namespace CinnamonCoffee
         {
             // Script reload / unload — clear animations and clean up so nothing is left stuck
             try { FullReset(); } catch { }
+            try { _waveMixer.Dispose(); } catch { }
             // Explicitly clear the player's task so the animation stops immediately
             try
             {
@@ -5547,12 +5547,12 @@ namespace CinnamonCoffee
                 x + 0.007f, y, 0.202f, 0.25f, false, 220, 220, 220, 255);
             y += lh;
             PartnerVoiceEntry active = _partnerVoices.Find(v => v.Name == _appliedPartnerVoice);
-            DrawMenuText("Confirmed: " + (active == null ? "AUTOMATIC" : active.Label),
+            DrawMenuText("Speech bank: " + (active == null ? "AUTOMATIC" : active.Label),
                 x + 0.007f, y, 0.202f, 0.23f, false, 170, 230, 170, 255);
             y += lh;
             if (_pendingPartnerVoiceChange)
             {
-                DrawMenuText(_voiceAwaitingReadback ? "Confirming voice in game..." : "Waiting for current line to finish...", x + 0.007f, y, 0.202f, 0.23f, false, 255, 220, 120, 255);
+                DrawMenuText("Waiting for current line to finish...", x + 0.007f, y, 0.202f, 0.23f, false, 255, 220, 120, 255);
                 y += lh;
             }
             DrawMenuItem("Automatic (mod default)" + (partnerVoice.Length == 0 ? " ~g~[x]" : ""), 0, x, ref y, lh);
@@ -5564,12 +5564,19 @@ namespace CinnamonCoffee
             }
         }
         // PARTNER AUDIO SCHEDULER
-        private const string SCRIPT_VERSION = "1.1";
+        private const string SCRIPT_VERSION = "1.2";
         private const string VOICE_FIX_VERSION = SCRIPT_VERSION;
-        private const int SPEECH_LAUNCH_GRACE_MS = 600;
+        private const int SPEECH_LAUNCH_GRACE_MS = 1200;
         private const int SPEECH_END_QUIET_MS = 450;
         private int _speechObservedPedHandle = 0;
         private bool _speechObservedActive = false;
+        private bool _speechRequestPending = false;
+        private int _speechStartFailures = 0;
+        private int _lastSpeechDiagnosticAt = -10000;
+        private string _lastSpeechName = "";
+        private bool _directorModeAudioActive = false;
+        private int _voiceReadbackAttempts = 0;
+        private bool _voiceReadbackConfirmed = false;
         private bool _speechQuietStarted = false;
         private int _speechQuietSince = 0;
         private int _nextPartnerLoopSpeechAt = 0;
@@ -5578,7 +5585,6 @@ namespace CinnamonCoffee
         private string _appliedPartnerVoice = "";
         private int _voiceApplyRetryAt = 0;
         private bool _measuringMenu = false;
-        private int _customSoundBusyUntil = 0;
         private string _queuedCustomSoundPath = null;
         private const Keys LIVE_VOICE_MENU_KEY = Keys.F6;
         private bool _pendingPartnerVoiceChange = false;
@@ -5593,27 +5599,55 @@ namespace CinnamonCoffee
         private bool IsPartnerSpeechBusy(Ped ped)
         {
             if (ped == null || !ped.Exists()) return false;
+            // WithVoice is ambient speech. ANY_SPEECH also includes unrelated engine chatter.
+            bool playing = Function.Call<bool>((Hash)0x9072C8B49907BFADUL, ped);
+            if (girl != null && girl.Exists() && ped.Handle != girl.Handle) return playing;
             int now = Game.GameTime;
-            // Other nearby peds must not erase the active partner's speech latch.
-            if (girl != null && girl.Exists() && ped.Handle != girl.Handle)
-                return Function.Call<bool>((Hash)0x729072355FA39EC9UL, ped);
             if (_speechObservedPedHandle != ped.Handle)
             {
                 _speechObservedPedHandle = ped.Handle;
                 _speechObservedActive = false;
+                _speechRequestPending = false;
                 _speechQuietStarted = false;
             }
-            int elapsed = unchecked(now - _speechLaunchAt);
-            bool launching = _speechLaunchPedHandle == ped.Handle && elapsed >= 0 && elapsed < SPEECH_LAUNCH_GRACE_MS;
-            bool playing = Function.Call<bool>((Hash)0x729072355FA39EC9UL, ped); // IS_ANY_SPEECH_PLAYING
-            if (playing || launching)
+            if (_speechRequestPending)
             {
-                _speechObservedActive = true;
+                if (playing)
+                {
+                    _speechRequestPending = false;
+                    _speechStartFailures = 0;
+                    _speechObservedActive = true;
+                    _speechQuietStarted = false;
+                }
+                else if (unchecked(now - _speechLaunchAt) < SPEECH_LAUNCH_GRACE_MS) return true;
+                else
+                {
+                    // A void native request can be declined. Retry promptly; no fake speech-end gap.
+                    _speechRequestPending = false;
+                    _speechStartFailures++;
+                    if (_speechStartFailures >= 3 && unchecked(now - _lastSpeechDiagnosticAt) >= 10000)
+                    {
+                        _lastSpeechDiagnosticAt = now;
+                        try { File.AppendAllText("scripts\\CinnamonCoffeeAudio.log", DateTime.UtcNow.ToString("o")
+                            + " speech start not acknowledged; bank=" + partnerVoice + "; event=" + _lastSpeechName + Environment.NewLine); } catch { }
+                    }
+                    // Retain the last request identity briefly: an engine start can arrive after timeout.
+                    _nextPartnerLoopSpeechAt = now + 750;
+                    return false;
+                }
+            }
+            if (!_speechObservedActive && playing && _speechLaunchPedHandle == ped.Handle
+                && unchecked(now - _speechLaunchAt) >= 0 && unchecked(now - _speechLaunchAt) < 5000)
+            {
+                _speechObservedActive = true; // Adopt a late acknowledgement of our recent request.
+                _speechQuietStarted = false;
+            }
+            if (!_speechObservedActive) return playing; // Background speech does not move our deadline.
+            if (playing)
+            {
                 _speechQuietStarted = false;
                 return true;
             }
-            if (!_speechObservedActive) return false;
-            // A single false frame can occur between streamed parts of the same line.
             if (!_speechQuietStarted)
             {
                 _speechQuietStarted = true;
@@ -5623,7 +5657,9 @@ namespace CinnamonCoffee
             if (unchecked(now - _speechQuietSince) < SPEECH_END_QUIET_MS) return true;
             _speechObservedActive = false;
             _speechQuietStarted = false;
-            _nextPartnerLoopSpeechAt = now + VOICE_INTERVAL;
+            _speechLaunchPedHandle = 0;
+            // Draw exactly one 2–5 second gap, measured from the first stable-end observation.
+            _nextPartnerLoopSpeechAt = _speechQuietSince + rng.Next(2000, 5001);
             return false;
         }
 
@@ -5657,29 +5693,8 @@ namespace CinnamonCoffee
         private void ApplyPendingPartnerVoice()
         {
             if (!_pendingPartnerVoiceChange || girl == null || !girl.Exists() || IsPartnerSpeechBusy(girl)) return;
-            int now = Game.GameTime;
-            if (_voiceAwaitingReadback)
-            {
-                uint actual = Function.Call<uint>((Hash)0x5E203DA2BA15D436UL, girl);
-                uint expected = string.IsNullOrEmpty(_voiceExpectedName) ? actual
-                    : Function.Call<uint>(Hash.GET_HASH_KEY, _voiceExpectedName);
-                if (actual == expected)
-                {
-                    _voiceAwaitingReadback = false;
-                    _pendingPartnerVoiceChange = false;
-                    _appliedPartnerVoice = partnerVoice;
-                    if (partnerVoice.Length == 0)
-                    {
-                        _voiceOverridePedHandle = 0;
-                        _nativeVoiceBeforeOverride = null;
-                    }
-                    return;
-                }
-                if (now < _voiceApplyRetryAt) return;
-                _voiceAwaitingReadback = false;
-            }
             bool wasOverridden = _voiceOverridePedHandle == girl.Handle;
-            _pendingPartnerVoiceChange = false; // Allow the original resolver to run without recursion.
+            _pendingPartnerVoiceChange = false;
             _girlCurrentVoice = null;
             string restored = null;
             if (partnerVoice.Length == 0 && wasOverridden && !aLifeMode && IsOriginalHookerModel(girl))
@@ -5694,11 +5709,38 @@ namespace CinnamonCoffee
                 Function.Call(Hash.SET_AMBIENT_VOICE_NAME, girl, restored);
             }
             AssignHookerVoice(girl);
+            if (restored != null) _girlCurrentVoice = restored;
             _voiceExpectedName = partnerVoice.Length > 0 ? partnerVoice : restored ?? _girlCurrentVoice;
-            _pendingPartnerVoiceChange = true;
+            // Explicit WithVoice uses this bank regardless of the ambient getter's delayed value.
+            _appliedPartnerVoice = partnerVoice;
             _voiceAwaitingReadback = true;
-            _voiceApplyRetryAt = now + 500;
-            // Confirm on the following tick: SET_AMBIENT_VOICE_NAME may be asynchronous.
+            _voiceReadbackConfirmed = false;
+            _voiceReadbackAttempts = 0;
+            _voiceApplyRetryAt = Game.GameTime + 100;
+            if (partnerVoice.Length == 0)
+            {
+                _voiceOverridePedHandle = 0;
+                _nativeVoiceBeforeOverride = null;
+            }
+        }
+
+        private void CheckPartnerVoiceReadback()
+        {
+            if (!_voiceAwaitingReadback || girl == null || !girl.Exists() || Game.GameTime < _voiceApplyRetryAt) return;
+            uint actual = Function.Call<uint>((Hash)0x5E203DA2BA15D436UL, girl);
+            uint expected = string.IsNullOrEmpty(_voiceExpectedName) ? actual
+                : Function.Call<uint>(Hash.GET_HASH_KEY, _voiceExpectedName);
+            _voiceReadbackConfirmed = actual == expected;
+            _voiceReadbackAttempts++;
+            _voiceAwaitingReadback = !_voiceReadbackConfirmed && _voiceReadbackAttempts < 3;
+            _voiceApplyRetryAt = Game.GameTime + 500;
+        }
+
+        private void EnsurePartnerDirectorAudio()
+        {
+            if (_directorModeAudioActive) return;
+            Function.Call(Hash.SET_AUDIO_FLAG, "IsDirectorModeActive", true);
+            _directorModeAudioActive = true;
         }
 
         private void TickPartnerAudio()
@@ -5708,10 +5750,12 @@ namespace CinnamonCoffee
                 ResetPartnerAudio();
                 return;
             }
-            IsPartnerSpeechBusy(girl); // Observe the entire lifecycle, even when no request is pending.
+            EnsurePartnerDirectorAudio(); // Bypass GTA's ambient cooldown while this interaction is active.
+            IsPartnerSpeechBusy(girl); // Observe accepted starts and actual ends, not requests alone.
             if (!_pendingPartnerVoiceChange && partnerVoice != _appliedPartnerVoice)
                 _pendingPartnerVoiceChange = true; // Also verify a selection restored from cfg/new partner.
             ApplyPendingPartnerVoice();
+            CheckPartnerVoiceReadback(); // Diagnostic only; it never gates playback.
             if (_pendingPartnerVoiceChange || _queuedSpeechName == null) return;
             if (!HasQueuedPartnerSpeech())
             {
@@ -5719,7 +5763,7 @@ namespace CinnamonCoffee
                 _queuedSpeechPed = null;
                 return;
             }
-            if (IsPartnerSpeechBusy(girl) || _bjThroatPending || _throatLockAt != 0 || _throatSpeedLocked) return;
+            if (IsPartnerSpeechBusy(girl)) return;
             string name = _queuedSpeechName;
             _queuedSpeechName = null;
             _queuedSpeechPed = null;
@@ -5780,10 +5824,20 @@ namespace CinnamonCoffee
             _speechLaunchAt = 0;
             _speechObservedPedHandle = 0;
             _speechObservedActive = false;
+            _speechRequestPending = false;
+            _speechStartFailures = 0;
+            _lastSpeechName = "";
             _speechQuietStarted = false;
             _nextPartnerLoopSpeechAt = 0;
+            if (_directorModeAudioActive)
+            {
+                Function.Call(Hash.SET_AUDIO_FLAG, "IsDirectorModeActive", false);
+                _directorModeAudioActive = false;
+            }
             _voiceAwaitingReadback = false;
             _voiceExpectedName = null;
+            _voiceReadbackConfirmed = false;
+            _voiceReadbackAttempts = 0;
             _appliedPartnerVoice = "";
             CloseLiveVoiceMenu();
         }
@@ -6638,6 +6692,9 @@ namespace CinnamonCoffee
             if (_usingController) return;  // keyboard ignored when gamepad is active
             if (_liveVoiceMenu && (e.KeyCode == menuBackKey || e.KeyCode == masterKey))
             { CloseLiveVoiceMenu(); return; }
+            // Animation master input is handled once in the tick; OS key-repeat must not
+            // run the general menu-close/proposition-exit handler while both peds animate.
+            if (state == ScriptState.Animating && e.KeyCode == masterKey) return;
             if (menuLevel == MenuLevel.None) return;
 
             int itemCount = GetCurrentMenuItemCount();
@@ -6899,6 +6956,10 @@ namespace CinnamonCoffee
                 || (Function.Call<bool>(Hash.IS_DISABLED_CONTROL_PRESSED, 0, masterControlModifier)
                     && Function.Call<bool>(Hash.IS_DISABLED_CONTROL_JUST_PRESSED, 0, masterControl))))
             { CloseLiveVoiceMenu(); return; }
+            // Leave the animation master combo to the tick, matching keyboard handling.
+            if (state == ScriptState.Animating
+                && Function.Call<bool>(Hash.IS_DISABLED_CONTROL_PRESSED, 0, masterControlModifier)
+                && Function.Call<bool>(Hash.IS_DISABLED_CONTROL_JUST_PRESSED, 0, masterControl)) return;
             if (menuLevel == MenuLevel.None) return;
 
             int itemCount = GetCurrentMenuItemCount();
@@ -7279,6 +7340,7 @@ namespace CinnamonCoffee
             }
             else if (menuLevel == MenuLevel.Finish)
             {
+                if (HasSimpleFinishMenu()) return 1;
                 if (!aLifeMode) return 2; // Sandbox: Pull Out (0), Inside Her (1) — no Ask
                 return _finishAsked ? 2 : 3; // A-Life: Ask to finish inside (hidden after use), Finish, Finish inside her
             }
@@ -7706,6 +7768,15 @@ namespace CinnamonCoffee
             }
             else if (menuLevel == MenuLevel.Finish)
             {
+                if (HasSimpleFinishMenu())
+                {
+                    _finishInside = false;
+                    _finishForced = false;
+                    _finishExecutePending = true;
+                    _finishExecuteAt = 0;
+                    menuLevel = MenuLevel.None;
+                    return;
+                }
                 // ── Sandbox (non-A-Life): simple 2-item menu, no dialogue, no rep ──
                 if (!aLifeMode)
                 {
@@ -10848,6 +10919,28 @@ namespace CinnamonCoffee
         // ═══════════════
         // ANIMATING STATE
         // ═══════════════
+        private bool HasSimpleFinishMenu()
+        {
+            return currentAction == "kissing" || currentAction == "facesitting";
+        }
+
+        private void HandleAnimationMasterMenu()
+        {
+            // A press only changes the overlay. Neither actor's tasks/playheads change
+            // until a finish option is selected. Holding the key never repeats it.
+            _suppressFinishUntilMasterReleased = true;
+            keyCooldown = KEY_COOLDOWN_FRAMES;
+            if (state != ScriptState.Animating || animPhase != 2 || _finishExecutePending || _liveVoiceMenu) return;
+            if (menuLevel == MenuLevel.Finish)
+            {
+                menuLevel = MenuLevel.None;
+                return;
+            }
+            if (menuLevel != MenuLevel.None) return;
+            menuLevel = MenuLevel.Finish;
+            menuIndex = 0;
+        }
+
         private void HandleAnimatingState(Ped player)
         {
             if (girl == null || !girl.Exists())
@@ -10919,12 +11012,10 @@ namespace CinnamonCoffee
             // Animation speed controls request cadence, never the duration of a speech line.
             int now = Game.GameTime;
             if (currentAction != "" && animPhase == 2 && animSpeed > 0f && now >= _nextPartnerLoopSpeechAt
-                && !_bjThroatPending && _throatLockAt == 0 && !_throatSpeedLocked
-                && !IsPartnerSpeechBusy(girl) && !_pendingPartnerVoiceChange && !HasQueuedPartnerSpeech() && now >= _bjSoundBusyUntil)
+                && !IsPartnerSpeechBusy(girl) && !_pendingPartnerVoiceChange && !HasQueuedPartnerSpeech())
             {
-                PlayMoaningSounds(); // GTA ambient speech
-                lastVoiceTime = now;
-                _nextPartnerLoopSpeechAt = now + VOICE_INTERVAL;
+                if (PlayMoaningSounds()) lastVoiceTime = now;
+                // Completion schedules the next 2–5 second gap; WAV playback cannot starve this request.
             }
 
             // Custom BJ sounds — separate, faster timer (runs alongside GTA speech)
@@ -10932,8 +11023,7 @@ namespace CinnamonCoffee
                 && !_bjThroatPending && _throatLockAt == 0 && !_throatSpeedLocked)
             {
                 int bjInterval = (int)(BJ_SOUND_INTERVAL / (1.0 + (animSpeed - 1.0) * 0.55));
-                bool gtaSpeechActive = IsPartnerSpeechBusy(girl) || HasQueuedPartnerSpeech() || _pendingPartnerVoiceChange;
-                if (!gtaSpeechActive && now - _lastBjSoundTime > bjInterval && now >= _bjSoundBusyUntil && now >= _customSoundBusyUntil)
+                if (now - _lastBjSoundTime > bjInterval && !_waveMixer.IsPlaying("bj") && _queuedCustomSoundPath == null)
                 {
                     // Look up (or compute) this woman's throat chance from her Confidence trait.
                     // In A-Life mode: use PersonalityProfile.Confidence (persisted to cache).
@@ -10971,10 +11061,12 @@ namespace CinnamonCoffee
                     if (_bjThroatIntroFile != null && _bjThroatFile != null && rng.NextDouble() < throatChance)
                     {
                         // The shared idle checks above let both speech and WAV playback finish first.
-                        PlayBjCustom(_bjThroatIntroFile);
-                        int introDur = _soundDurations.ContainsKey(_bjThroatIntroFile) ? _soundDurations[_bjThroatIntroFile] : 3000;
-                        _bjThroatPending = true;
-                        _bjThroatAt = now + introDur; // Preserve the entire intro clip.
+                        if (PlayBjCustom(_bjThroatIntroFile))
+                        {
+                            int introDur = _soundDurations.ContainsKey(_bjThroatIntroFile) ? _soundDurations[_bjThroatIntroFile] : 3000;
+                            _bjThroatPending = true;
+                            _bjThroatAt = now + introDur;
+                        }
                     }
                     else
                     {
@@ -10993,13 +11085,15 @@ namespace CinnamonCoffee
             }
 
             // BJThroat follow-up: play BJThroat.wav after BJThroat_Intro.wav finishes
-            if (_bjThroatPending && now >= _bjThroatAt && now >= _customSoundBusyUntil)
+            if (_bjThroatPending && now >= _bjThroatAt && !_waveMixer.IsPlaying("bj"))
             {
                 _bjThroatPending = false;
-                PlayBjCustom(_bjThroatFile); // Preserve the full intro before starting the next clip.
-                int throatDur = _soundDurations.ContainsKey(_bjThroatFile) ? _soundDurations[_bjThroatFile] : 8000;
-                _throatLockAt        = now + 1000;            // lock speed 1s after main WAV starts
-                _throatSequenceEndAt = now + throatDur + 300; // 300ms buffer after WAV ends
+                if (PlayBjCustom(_bjThroatFile))
+                {
+                    int throatDur = _soundDurations.ContainsKey(_bjThroatFile) ? _soundDurations[_bjThroatFile] : 8000;
+                    _throatLockAt = now + 1000;
+                    _throatSequenceEndAt = now + throatDur + 300;
+                }
             }
 
             // Sex slap sounds — car sex + applicable street sex actions; silent below 1.40x, silent for facesitting (idx 1)
@@ -11718,473 +11812,11 @@ namespace CinnamonCoffee
             }
 
             // The live voice overlay consumes its close button without finishing the animation.
-            // Master key / controller master button: finish / cum / abort
             bool masterTriggered = _usingController
                 ? (Function.Call<bool>(Hash.IS_DISABLED_CONTROL_PRESSED, 0, masterControlModifier) && Function.Call<bool>(Hash.IS_DISABLED_CONTROL_JUST_PRESSED, 0, masterControl))
                 : Game.IsKeyPressed(masterKey);
             if (masterTriggered && keyCooldown == 0 && !_liveVoiceMenu && !_suppressFinishUntilMasterReleased)
-            {
-                keyCooldown = KEY_COOLDOWN_FRAMES;
-
-                if (mode == Mode.Car)
-                {
-                    // During intro phases (0, 1) - abort immediately
-                    if (animPhase == 0 || animPhase == 1)
-                    {
-                        // Get current dict and animation names
-                        string dict;
-                        string fAnim, mAnim;
-
-                        if (_backseatCarSex)
-                        {
-                            dict = "random@drunk_driver_2";
-                            RequestAnimDict(dict);
-                            fAnim = "cardrunksex_intro_f";
-                            mAnim = "cardrunksex_intro_m";
-                        }
-                        else
-                        {
-                        // Get current dict based on vehicle type
-                        int camMode = Function.Call<int>(Hash.GET_FOLLOW_PED_CAM_VIEW_MODE);
-                        bool isFirstPerson = (camMode == 4);
-                        
-                        if (vehicleAnimType == VehicleAnimType.Low)
-                            dict = isFirstPerson ? VEH_LOW_FP_DICT : VEH_LOW_DICT;
-                        else
-                            dict = isFirstPerson ? VEH_NORM_FP_DICT : VEH_NORM_DICT;
-                        
-                        // Get current animation names based on phase and action
-                        
-                        if (animPhase == 0)
-                        {
-                            if (currentAction == "blowjob")
-                            {
-                                if (vehicleAnimType == VehicleAnimType.Low)
-                                {
-                                    fAnim = "low_car_prop_to_bj_p1_female";
-                                    mAnim = "low_car_prop_to_bj_p1_player";
-                                }
-                                else
-                                {
-                                    fAnim = "proposition_to_bj_p1_prostitute";
-                                    mAnim = "proposition_to_bj_p1_male";
-                                }
-                            }
-                            else // sex
-                            {
-                                if (vehicleAnimType == VehicleAnimType.Low)
-                                {
-                                    fAnim = "low_car_prop_to_sex_p1_female";
-                                    mAnim = "low_car_prop_to_sex_p1_player";
-                                }
-                                else
-                                {
-                                    fAnim = "proposition_to_sex_p1_prostitute";
-                                    mAnim = "proposition_to_sex_p1_male";
-                                }
-                            }
-                        }
-                        else // phase 1
-                        {
-                            if (currentAction == "blowjob")
-                            {
-                                if (vehicleAnimType == VehicleAnimType.Low)
-                                {
-                                    fAnim = "low_car_prop_to_bj_p2_female";
-                                    mAnim = "low_car_prop_to_bj_p2_player";
-                                }
-                                else
-                                {
-                                    fAnim = "proposition_to_bj_p2_prostitute";
-                                    mAnim = "proposition_to_bj_p2_male";
-                                }
-                            }
-                            else // sex
-                            {
-                                if (vehicleAnimType == VehicleAnimType.Low)
-                                {
-                                    fAnim = "low_car_prop_to_sex_p2_female";
-                                    mAnim = "low_car_prop_to_sex_p2_player";
-                                }
-                                else
-                                {
-                                    fAnim = "proposition_to_sex_p2_prostitute";
-                                    mAnim = "proposition_to_sex_p2_male";
-                                }
-                            }
-                        }
-                        } // end else (front seat abort anims)
-                        
-                        // Abort immediately: stop current intro anim on both peds
-                        Function.Call(Hash.STOP_ANIM_TASK, girl,   dict, fAnim, -4.0f);
-                        Function.Call(Hash.STOP_ANIM_TASK, player, dict, mAnim, -4.0f);
-
-                        DetachDildoProp();
-                        if (player.IsInVehicle() && player.CurrentVehicle != null)
-                        {
-                            player.CurrentVehicle.IsInteriorLightOn = interiorLightEnabled;
-                        }
-
-                        // Refund in prostitution or A-Life hooker mode
-                        if ((!sandboxMode || _aLifeHookerServices) && lastPaidAmount > 0)
-                        {
-                            if (aLifeMode && _currentGirlKey != null)
-                            {
-                                ALifePedData dRef;
-                                if (_aLifePeds.TryGetValue(_currentGirlKey, out dRef))
-                                {
-                                    dRef.Cash = Math.Max(0, dRef.Cash - lastPaidAmount);
-                                    SaveALife();
-                                }
-                            }
-                            Game.Player.Money += lastPaidAmount;
-                            ShowHudStatus("~r~ABORTED! ~s~REFUNDED AMOUNT: ~g~$" + lastPaidAmount, 3000);
-                            lastPaidAmount = 0;
-                        }
-                        else
-                        {
-                            ShowHudStatus("~r~ABORTED!", 3000);
-                        }
-
-                        // Snap both peds back to proposition loop immediately
-                        if (_backseatCarSex)
-                        {
-                            const string DRUNK_DICT = "random@drunk_driver_2";
-                            RequestAnimDict(DRUNK_DICT);
-                            Function.Call(Hash.TASK_PLAY_ANIM, girl,   DRUNK_DICT, "cardrunkflirt_loop_f",
-                                8.0f, -4.0f, -1, 1, 0.0f, false, false, false);
-                            Function.Call(Hash.TASK_PLAY_ANIM, player, DRUNK_DICT, "cardrunkflirt_loop_m",
-                                8.0f, -4.0f, -1, driveableCar ? 33 : 1, 0.0f, false, false, false);
-                        }
-                        else
-                        {
-                            string fLoop, mLoop;
-                            if (vehicleAnimType == VehicleAnimType.Low)
-                            { fLoop = "low_car_prop_loop_female"; mLoop = "low_car_prop_loop_player"; }
-                            else
-                            { fLoop = "proposition_loop_prostitute"; mLoop = "proposition_loop_male"; }
-                            Function.Call(Hash.TASK_PLAY_ANIM, girl,   dict, fLoop,
-                                8.0f, -4.0f, -1, 1, 0.0f, false, false, false);
-                            Function.Call(Hash.TASK_PLAY_ANIM, player, dict, mLoop,
-                                8.0f, -4.0f, -1, driveableCar ? 33 : 1, 0.0f, false, false, false);
-                        }
-
-                        _telemetry.SendStop();
-                        _backseatCarSex       = false;
-                        carPropActive         = true;
-                        carPropPhase          = 1;
-                        state                 = ScriptState.Idle;
-                        animPhase             = 0;
-                        animSpeed             = 1.0f;
-                        _femaleAnimSpeedScale = 1.0f;
-                        currentAction         = "";
-                        menuLevel             = MenuLevel.Services;
-                        menuIndex             = 0;
-                        return;
-                    }
-                    // During loop phase (2) - trigger exit sequence
-                    else if (animPhase == 2)
-                    {
-                        if (currentAction != "kissing" && currentAction != "facesitting")
-                        {
-                            // Open finish menu — player picks Pull Out or Finish Inside
-                            menuLevel = MenuLevel.Finish;
-                            menuIndex = 0;
-                        }
-                        else
-                        {
-                        // Trigger outro - reverse sequence from BJ back to proposition (flag 2 = hold last frame)
-                        int camMode = Function.Call<int>(Hash.GET_FOLLOW_PED_CAM_VIEW_MODE);
-                        bool isFirstPerson = (camMode == 4);
-                        
-                        string dict;
-                        if (vehicleAnimType == VehicleAnimType.Low)
-                            dict = isFirstPerson ? VEH_LOW_FP_DICT : VEH_LOW_DICT;
-                        else
-                            dict = isFirstPerson ? VEH_NORM_FP_DICT : VEH_NORM_DICT;
-                        
-                        string fExitP1, mExitP1;
-                        
-                        if (currentAction == "blowjob")
-                        {
-                            if (vehicleAnimType == VehicleAnimType.Low)
-                            {
-                                fExitP1 = "low_car_bj_to_prop_p1_female";
-                                mExitP1 = "low_car_bj_to_prop_p1_player";
-                            }
-                            else
-                            {
-                                fExitP1 = "bj_to_proposition_p1_prostitute";
-                                mExitP1 = "bj_to_proposition_p1_male";
-                            }
-                        }
-                        else // sex
-                        {
-                            if (vehicleAnimType == VehicleAnimType.Low)
-                            {
-                                fExitP1 = "low_car_sex_to_prop_p1_female";
-                                mExitP1 = "low_car_sex_to_prop_p1_player";
-                            }
-                            else
-                            {
-                                fExitP1 = "sex_to_proposition_p1_prostitute";
-                                mExitP1 = "sex_to_proposition_p1_male";
-                            }
-                        }
-                        
-                        Function.Call(Hash.TASK_PLAY_ANIM, girl, dict, fExitP1,
-                            8.0f, -4.0f, -1, 2, 0.0f, false, false, false);
-                        Function.Call(Hash.TASK_PLAY_ANIM, player, dict, mExitP1,
-                            8.0f, -4.0f, -1, driveableCar ? 34 : 2, 0.0f, false, false, false);
-
-                        animPhase = 3; // Move to outro phase
-                        _telemetry.SendStop(); // halt device as soon as outro begins
-                        if (_usingController) { SetVibration(65535, 65535); _lastRumbleTime = Game.GameTime; _rumblePulseActive = true; _finishBurstFired = true; }
-                        // Set wait time = now + exit anim duration (ms)
-                        float exitP1Dur = Function.Call<float>(Hash.GET_ANIM_DURATION, dict, fExitP1);
-                        animWaitTime = Game.GameTime + (int)(exitP1Dur * 1000f);
-                        // DON'T clear currentAction yet - phases 3 and 4 need it for animation names
-                        
-                        ShowHudStatus("~g~FINISHING...", 2000);
-                        } // end else (not A-Life)
-                    }
-                    // During exit phases (3, 4) - ignore input, let animations finish
-                    else
-                    {
-                        // Do nothing, wait for exit animations to complete
-                    }
-                }
-                else
-                {
-                    // Street sitting action: special phase handling
-                    if (_streetSitPropActive && (streetActionIdx == 6 || streetActionIdx == 3 || streetActionIdx == 1 || streetActionIdx == 7 || streetActionIdx == 4 || streetActionIdx == 8 || streetActionIdx == 9))
-                    {
-                        if (animPhase <= 1)
-                        {
-                            // Abort during intro — refund and return to proposition loop
-                            if ((!sandboxMode || _aLifeHookerServices) && lastPaidAmount > 0)
-                            {
-                                if (aLifeMode && _currentGirlKey != null)
-                                {
-                                    ALifePedData dRef;
-                                    if (_aLifePeds.TryGetValue(_currentGirlKey, out dRef))
-                                    {
-                                        dRef.Cash = Math.Max(0, dRef.Cash - lastPaidAmount);
-                                        SaveALife();
-                                    }
-                                }
-                                Game.Player.Money += lastPaidAmount;
-                                ShowHudStatus("~r~ABORTED! ~s~REFUNDED AMOUNT: ~g~$" + lastPaidAmount, 3000);
-                                lastPaidAmount = 0;
-                            }
-                            else
-                            {
-                                ShowHudStatus("~r~ABORTED!", 3000);
-                            }
-
-                            // Return to proposition loop
-                            DetachDildoProp();
-                            _telemetry.SendStop();
-
-                            // Facesitting / Reverse Cowgirl / Laying BJ / Laying Cowgirl: ensure screen is visible on abort
-                            if ((streetActionIdx == 1 || streetActionIdx == 7 || streetActionIdx == 4 || streetActionIdx == 8 || streetActionIdx == 9)
-                                && (Function.Call<bool>(Hash.IS_SCREEN_FADED_OUT) || Function.Call<bool>(Hash.IS_SCREEN_FADING_OUT)))
-                            {
-                                Function.Call(Hash.DO_SCREEN_FADE_IN, 500);
-                            }
-                            _streetOutroFadeAt = 0;
-
-                            // Reposition back to proposition Z if action changed it
-                            {
-                                float propZ = _streetSitOriginPos.Z + (-0.855f);
-                                Vector3 rp = player.Position;
-                                float dZ = propZ - rp.Z;
-                                if (Math.Abs(dZ) > 0.01f)
-                                {
-                                    Function.Call(Hash.SET_ENTITY_COORDS_NO_OFFSET, player,
-                                        rp.X, rp.Y, propZ, false, false, false);
-                                    if (girl != null && girl.Exists())
-                                    {
-                                        Vector3 rg = girl.Position;
-                                        Function.Call(Hash.SET_ENTITY_COORDS_NO_OFFSET, girl,
-                                            rg.X, rg.Y, rg.Z + dZ, false, false, false);
-                                    }
-                                }
-                            }
-
-                            string pMD, pMA, pFD, pFA;
-                            Vector3 pOff; float pHd; bool pSit; float pZO, pRX, pRH;
-                            GetStreetPropAnimData(2, out pMD, out pMA, out pFD, out pFA,
-                                out pOff, out pHd, out pSit, out pZO, out pRX, out pRH);
-                            if (RequestAnimDict(pMD))
-                            {
-                                // Facesitting / Reverse Cowgirl / Laying BJ / Laying Cowgirl: reposition girl back to proposition offset
-                                if ((streetActionIdx == 1 || streetActionIdx == 7 || streetActionIdx == 4 || streetActionIdx == 8 || streetActionIdx == 9) && girl != null && girl.Exists())
-                                {
-                                    Vector3 girlPropPos = player.GetOffsetPosition(pOff);
-                                    Function.Call(Hash.SET_ENTITY_COORDS_NO_OFFSET, girl,
-                                        girlPropPos.X, girlPropPos.Y, girlPropPos.Z, false, false, false);
-                                    girl.Heading = player.Heading + pHd;
-                                }
-
-                                Vector3 pp = player.Position;
-                                Function.Call(Hash.TASK_PLAY_ANIM_ADVANCED, player, pMD, pMA,
-                                    pp.X, pp.Y, pp.Z, pRX, 0f, player.Heading,
-                                    8.0f, -4.0f, -1, 9, 0f, 2, 0);
-                                Function.Call(Hash.TASK_PLAY_ANIM, girl, pFD, pFA,
-                                    8.0f, -4.0f, -1, 9, 0f, false, false, false);
-                            }
-
-                            state = ScriptState.Idle;
-                            animPhase = 0;
-                            animSpeed = 1.0f;
-                            _femaleAnimSpeedScale = 1.0f;
-                            currentAction = "";
-                            streetActionIdx = -1;
-                            _streetSitPropPhase = 2;
-                            menuLevel = _streetSitCategory;
-                            menuIndex = 0;
-                            keyCooldown = KEY_COOLDOWN_FRAMES * 3;
-                            return;
-                        }
-                        if (animPhase >= 3)
-                            return; // outro running, ignore
-                        // animPhase == 2: fall through to existing code (opens Finish menu)
-                    }
-
-                    // Street mode: during intro phase, refund on abort
-                    bool _refundShown = false;
-                    if (animPhase < 2 && (!sandboxMode || _aLifeHookerServices) && lastPaidAmount > 0)
-                    {
-                        if (aLifeMode && _currentGirlKey != null)
-                        {
-                            ALifePedData dRef;
-                            if (_aLifePeds.TryGetValue(_currentGirlKey, out dRef))
-                            {
-                                dRef.Cash = Math.Max(0, dRef.Cash - lastPaidAmount);
-                                SaveALife();
-                            }
-                        }
-                        Game.Player.Money += lastPaidAmount;
-                        ShowHudStatus("~r~ABORTED! ~s~REFUNDED AMOUNT: ~g~$" + lastPaidAmount, 3000);
-                        lastPaidAmount = 0;
-                        _refundShown = true;
-                    }
-                    // Kissing outro running — ignore input, let it play out
-                    if (streetActionIdx == 0 && animPhase == 3)
-                        return;
-                    // Standing BJ / Wall Sex / Doggy outro/finish running — ignore input
-                    if ((streetActionIdx == 2 || streetActionIdx == 5 || streetActionIdx == 10 || streetActionIdx == 11) && animPhase >= 3)
-                        return;
-                    // Standing BJ / Wall Sex / Doggy abort during fade — ensure screen is visible
-                    if ((streetActionIdx == 2 || streetActionIdx == 5 || streetActionIdx == 10 || streetActionIdx == 11) && (animPhase < 2 || animPhase == 100)
-                        && (Function.Call<bool>(Hash.IS_SCREEN_FADED_OUT) || Function.Call<bool>(Hash.IS_SCREEN_FADING_OUT)))
-                    {
-                        Function.Call(Hash.DO_SCREEN_FADE_IN, 500);
-                    }
-
-                    // Standing service abort during intro: clean up and reopen menu
-                    if (animPhase < 2 && (streetActionIdx == 0 || streetActionIdx == 2 || streetActionIdx == 5 || streetActionIdx == 10 || streetActionIdx == 11))
-                    {
-                        if (!_refundShown) // refund block already showed its own message
-                            ShowHudStatus("~r~ABORTED!", 3000);
-                        // Stop any intro anims
-                        player.Task.ClearAll();
-                        if (girl != null && girl.Exists()) girl.Task.ClearAll();
-                        DetachDildoProp();
-                        _telemetry.SendStop();
-                        // Reset state and reopen Standing Services
-                        state = ScriptState.Idle;
-                        animPhase = 0;
-                        animSpeed = 1.0f;
-                        _femaleAnimSpeedScale = 1.0f;
-                        currentAction = "";
-                        streetActionIdx = -1;
-                        _kissingReverse = false;
-                        _standingBjReverse = false;
-                        _rdoggyReverse = false;
-                        _sitCowgirlPulloutReverse = false;
-                        _standingBjSwallowAt = 0;
-                        player.IsPositionFrozen = false;
-                        Function.Call(Hash.SET_ENTITY_COLLISION, player, true, true);
-                        if (girl != null && girl.Exists())
-                        {
-                            girl.IsPositionFrozen = false;
-                            Function.Call(Hash.SET_ENTITY_COLLISION, girl, true, true);
-                            Function.Call(Hash.SET_ENTITY_NO_COLLISION_ENTITY, girl, player, true);
-                            Function.Call(Hash.SET_PED_KEEP_TASK, girl, false);
-                            Function.Call(Hash.SET_BLOCKING_OF_NON_TEMPORARY_EVENTS, girl, true);
-                            float dist = girl.Position.DistanceTo(player.Position);
-                            float speed = (dist > 7f) ? 3f : 1f;
-                            Function.Call(Hash.TASK_FOLLOW_TO_OFFSET_OF_ENTITY,
-                                girl, player, 0f, -1f, 0f, speed, -1, 1.5f, true);
-                        }
-                        Function.Call(Hash.SET_PLAYER_CAN_DO_DRIVE_BY, Game.Player, true);
-                        Function.Call(Hash.SET_EVERYONE_IGNORE_PLAYER, Game.Player, false);
-                        negotiateMode = false;
-                        menuLevel = MenuLevel.StandingServices;
-                        menuIndex = 0;
-                        keyCooldown = KEY_COOLDOWN_FRAMES * 3;
-                        return;
-                    }
-
-                    // Play finish voice line when ending from loop (not aborts)
-                    if (animPhase >= 2)
-                    {
-                        if (streetActionIdx != 0 && streetActionIdx != 1) // 0=Kissing, 1=Facesitting — no finish menu
-                        {
-                            menuLevel = MenuLevel.Finish;
-                            menuIndex = 0;
-                            return; // wait for dialogue choice before ending
-                        }
-                        // Kissing: start outro — set playhead to loop end, positive speed, let it run out
-                        if (streetActionIdx == 0)
-                        {
-                            _kissingReverse = false;
-                            Function.Call(Hash.SET_ENTITY_ANIM_CURRENT_TIME, player, currentMaleDict, currentMaleAnim, 0.500f);
-                            Function.Call(Hash.SET_ENTITY_ANIM_CURRENT_TIME, girl, currentFemaleDict, currentFemaleAnim, 0.500f);
-                            Function.Call(Hash.SET_ENTITY_ANIM_SPEED, player, currentMaleDict, currentMaleAnim, animSpeed);
-                            Function.Call(Hash.SET_ENTITY_ANIM_SPEED, girl, currentFemaleDict, currentFemaleAnim, animSpeed);
-                            animPhase = 3;
-                            if (_usingController) { SetVibration(65535, 65535); _lastRumbleTime = Game.GameTime; _rumblePulseActive = true; _finishBurstFired = true; }
-                            ShowHudStatus("~g~FINISHING...", 2000);
-                            return;
-                        }
-                        // Facesitting with prop active: start the outro transition instead of EndAnimation
-                        if (streetActionIdx == 1 && _streetSitPropActive)
-                        {
-                            string exMD, exMA, exFD, exFA;
-                            Vector3 exOff; float exHd; bool exSit; float exZO, exRX, exRH;
-                            GetStreetPropIntroExitAnimData(2, streetActionIdx, out exMD, out exMA, out exFD, out exFA,
-                                out exOff, out exHd, out exSit, out exZO, out exRX, out exRH);
-                            if (RequestAnimDict(exFD))
-                            {
-                                // Reposition girl to vanilla transition offset before playing outro
-                                if (girl != null && girl.Exists())
-                                {
-                                    Vector3 girlOutroPos = player.GetOffsetPosition(new Vector3(0.73f, -0.77f, -0.3f));
-                                    Function.Call(Hash.SET_ENTITY_COORDS_NO_OFFSET, girl,
-                                        girlOutroPos.X, girlOutroPos.Y, girlOutroPos.Z, false, false, false);
-                                    girl.Heading = player.Heading;
-                                }
-                                // Only play female outro P1 — male stays in loop
-                                Function.Call(Hash.TASK_PLAY_ANIM, girl, exFD, exFA,
-                                    8.0f, -4.0f, -1, 2, 0f, false, false, false);
-                            }
-                            animPhase = 3;
-                            _telemetry.SendStop();
-                            if (_usingController) { SetVibration(65535, 65535); _lastRumbleTime = Game.GameTime; _rumblePulseActive = true; _finishBurstFired = true; }
-                            float exDur = Function.Call<float>(Hash.GET_ANIM_DURATION, exFD, exFA);
-                            animWaitTime = Game.GameTime + (int)(exDur * 1000f);
-                            ShowHudStatus("~g~FINISHING...", 2000);
-                            return;
-                        }
-                        if (_usingController) { SetVibration(65535, 65535); _lastRumbleTime = Game.GameTime; _rumblePulseActive = true; _finishBurstFired = true; }
-                        PlayFinishSounds();
-                    }
-                    EndAnimation();
-                }
-            }
+                HandleAnimationMasterMenu();
 
             // Execute the actual finish once the Finish menu choice is resolved
             if (_finishExecutePending && menuLevel == MenuLevel.None && Game.GameTime >= _finishExecuteAt)
@@ -12194,7 +11826,7 @@ namespace CinnamonCoffee
                 // End the effect sequence; the current spoken line is allowed to finish.
                 if (currentAction == "blowjob")
                 {
-                    try { if (_bjPlayer != null) _bjPlayer.Stop(); } catch { }
+                    _waveMixer.Stop("bj");
                     _bjSoundBusyUntil    = 0;
                     _bjThroatPending     = false;
                     _throatSpeedLocked   = false;
@@ -12202,6 +11834,48 @@ namespace CinnamonCoffee
                     _throatSequenceEndAt = 0;
                 }
 
+                // Kissing: start outro — set playhead to loop end, positive speed, let it run out
+                if (mode == Mode.Street && streetActionIdx == 0 && animPhase == 2)
+                {
+                    _kissingReverse = false;
+                    Function.Call(Hash.SET_ENTITY_ANIM_CURRENT_TIME, player, currentMaleDict, currentMaleAnim, 0.500f);
+                    Function.Call(Hash.SET_ENTITY_ANIM_CURRENT_TIME, girl, currentFemaleDict, currentFemaleAnim, 0.500f);
+                    Function.Call(Hash.SET_ENTITY_ANIM_SPEED, player, currentMaleDict, currentMaleAnim, animSpeed);
+                    Function.Call(Hash.SET_ENTITY_ANIM_SPEED, girl, currentFemaleDict, currentFemaleAnim, animSpeed);
+                    animPhase = 3;
+                    if (_usingController) { SetVibration(65535, 65535); _lastRumbleTime = Game.GameTime; _rumblePulseActive = true; _finishBurstFired = true; }
+                    ShowHudStatus("~g~FINISHING...", 2000);
+                    return;
+                }
+                // Facesitting with prop active: start the outro transition instead of EndAnimation
+                if (mode == Mode.Street && streetActionIdx == 1 && _streetSitPropActive && animPhase == 2)
+                {
+                    string exMD, exMA, exFD, exFA;
+                    Vector3 exOff; float exHd; bool exSit; float exZO, exRX, exRH;
+                    GetStreetPropIntroExitAnimData(2, streetActionIdx, out exMD, out exMA, out exFD, out exFA,
+                        out exOff, out exHd, out exSit, out exZO, out exRX, out exRH);
+                    if (RequestAnimDict(exFD))
+                    {
+                        // Reposition girl to vanilla transition offset before playing outro
+                        if (girl != null && girl.Exists())
+                        {
+                            Vector3 girlOutroPos = player.GetOffsetPosition(new Vector3(0.73f, -0.77f, -0.3f));
+                            Function.Call(Hash.SET_ENTITY_COORDS_NO_OFFSET, girl,
+                                girlOutroPos.X, girlOutroPos.Y, girlOutroPos.Z, false, false, false);
+                            girl.Heading = player.Heading;
+                        }
+                        // Only play female outro P1 — male stays in loop
+                        Function.Call(Hash.TASK_PLAY_ANIM, girl, exFD, exFA,
+                            8.0f, -4.0f, -1, 2, 0f, false, false, false);
+                    }
+                    animPhase = 3;
+                    _telemetry.SendStop();
+                    if (_usingController) { SetVibration(65535, 65535); _lastRumbleTime = Game.GameTime; _rumblePulseActive = true; _finishBurstFired = true; }
+                    float exDur = Function.Call<float>(Hash.GET_ANIM_DURATION, exFD, exFA);
+                    animWaitTime = Game.GameTime + (int)(exDur * 1000f);
+                    ShowHudStatus("~g~FINISHING...", 2000);
+                    return;
+                }
                 if (mode == Mode.Car && animPhase == 2)
                 {
                     string dictF = string.Empty, fExF = string.Empty, mExF = string.Empty;
@@ -17195,13 +16869,13 @@ namespace CinnamonCoffee
         }
 
         /// <summary>Play ambient speech on a ped with Director Mode audio flag for non-hooker compatibility.</summary>
-        private void PlayPedSpeech(Ped ped, string speechName)
+        private bool PlayPedSpeech(Ped ped, string speechName)
         {
-            if (ped == null || !ped.Exists()) return;
-            if (IsPartnerSpeechBusy(ped) || _pendingPartnerVoiceChange || _bjThroatPending || _throatLockAt != 0 || _throatSpeedLocked)
-            { QueuePartnerSpeech(ped, speechName); return; }
+            if (ped == null || !ped.Exists()) return false;
+            if (IsPartnerSpeechBusy(ped) || _pendingPartnerVoiceChange)
+            { QueuePartnerSpeech(ped, speechName); return false; }
             if (girl != null && ped.Handle == girl.Handle) AssignHookerVoice(ped);
-            // Explicitly select the requested bank; never FORCE a replacement over engine audio.
+            EnsurePartnerDirectorAudio();
             string voice = !string.IsNullOrEmpty(partnerVoice) ? partnerVoice : _girlCurrentVoice;
             if (!string.IsNullOrEmpty(voice))
                 Function.Call((Hash)0x3523634255FC3318L, ped, speechName, voice, "SPEECH_PARAMS_ALLOW_REPEAT", 0);
@@ -17210,28 +16884,20 @@ namespace CinnamonCoffee
             _speechLaunchPedHandle = ped.Handle;
             _speechLaunchAt = Game.GameTime;
             _speechObservedPedHandle = ped.Handle;
-            _speechObservedActive = true;
+            _speechRequestPending = true;
+            _lastSpeechName = speechName;
+            _speechObservedActive = false; // A request is not evidence that the engine started the line.
             _speechQuietStarted = false;
+            return true;
         }
 
         /// <summary>Play ambient speech moaning sounds on the girl.</summary>
-        private void PlayMoaningSounds()
+        private bool PlayMoaningSounds()
         {
-            if (!femaleMoanVoice) return;
-            if (girl == null || !girl.Exists() || currentAction == "" || currentAction == "kissing") return;
-
-            // Hostile/Avoiding (rep <= -1): she barely participates — 1% chance she makes any sound
-            if (aLifeMode && _currentGirlFp != null)
-            {
-                ALifePedData dMoan;
-                if (_aLifePeds.TryGetValue(_currentGirlKey, out dMoan) && dMoan.Reputation <= -1
-                    && rng.NextDouble() >= 0.01)
-                    return;
-            }
-
-            AssignHookerVoice(girl);
-            string speechName = (currentAction == "blowjob") ? "SEX_ORAL" : "SEX_GENERIC";
-            PlayPedSpeech(girl, speechName);
+            if (!femaleMoanVoice || girl == null || !girl.Exists() || currentAction == "" || currentAction == "kissing") return false;
+            // Relationship traits must not turn the user's enabled dialogue setting into a 1% lottery.
+            string speechName = currentAction == "blowjob" ? "SEX_ORAL" : "SEX_GENERIC";
+            return PlayPedSpeech(girl, speechName);
         }
 
         /// <summary>Play girl's service offer voice when opening services menu.</summary>
@@ -17338,35 +17004,38 @@ namespace CinnamonCoffee
         /// Play a custom BJ WAV file asynchronously from the pre-loaded volume-adjusted buffer.
         /// Skips if another custom sound is already playing, unless <paramref name="force"/> is true.
         /// </summary>
+        private void ReportWavePlaybackError()
+        {
+            if (_waveMixer.LastError == 0 || Game.GameTime - _lastWavePlaybackErrorAt < 10000) return;
+            _lastWavePlaybackErrorAt = Game.GameTime;
+            ShowHudStatus("~y~AUDIO DEVICE ERROR: " + _waveMixer.LastError, 3000);
+            try { File.AppendAllText("scripts\\CinnamonCoffeeAudio.log", DateTime.UtcNow.ToString("o")
+                + " waveOut=" + _waveMixer.LastError + Environment.NewLine); } catch { }
+        }
+
         private void TickCustomSound()
         {
-            if (_queuedCustomSoundPath == null || Game.GameTime < _customSoundBusyUntil) return;
+            _waveMixer.Tick();
+            if (_queuedCustomSoundPath == null || _waveMixer.IsPlaying("bj")) return;
             string path = _queuedCustomSoundPath;
             _queuedCustomSoundPath = null;
             PlayBjCustom(path);
         }
 
-        private void PlayBjCustom(string path, bool force = false)
+        private bool PlayBjCustom(string path, bool force = false)
         {
-            if (path == null) return;
-            if (Game.GameTime < _customSoundBusyUntil)
-            {
-                if (force && _bjWavData.ContainsKey(path)) _queuedCustomSoundPath = path;
-                return;
-            }
+            if (path == null) return false;
             byte[] data;
-            if (!_bjWavData.TryGetValue(path, out data)) return;
-            try
+            if (!_bjWavData.TryGetValue(path, out data)) return false;
+            if (_waveMixer.IsPlaying("bj"))
             {
-                if (_bjPlayer == null) _bjPlayer = new System.Media.SoundPlayer();
-                _bjPlayer.Stream = new System.IO.MemoryStream(data);
-                _bjPlayer.Load();
-                _bjPlayer.Play();
-                int dur = _soundDurations.ContainsKey(path) ? _soundDurations[path] : 3000;
-                _customSoundBusyUntil = Game.GameTime + dur + 50;
-                _bjSoundBusyUntil = _customSoundBusyUntil;
+                if (force) _queuedCustomSoundPath = path;
+                return false;
             }
-            catch { }
+            if (!_waveMixer.Play(data, "bj")) { ReportWavePlaybackError(); return false; }
+            int dur = _soundDurations.ContainsKey(path) ? _soundDurations[path] : 3000;
+            _bjSoundBusyUntil = Game.GameTime + dur;
+            return true;
         }
 
         /// <summary>Return the slap interval triplet (slow/mid/fast ms) for the current action.</summary>
@@ -17401,40 +17070,22 @@ namespace CinnamonCoffee
             }
         }
 
-        /// <summary>Play an effect only after the shared WinMM WAV channel becomes idle.</summary>
+        /// <summary>Start a full effect clip without replacing earlier clips.</summary>
         private void PlaySlapSound(string path)
         {
-            if (path == null || Game.GameTime < _customSoundBusyUntil) return;
             byte[] data;
-            if (!_bjWavData.TryGetValue(path, out data)) return;
-            try
-            {
-                if (_slapPlayer == null) _slapPlayer = new System.Media.SoundPlayer();
-                _slapPlayer.Stream = new System.IO.MemoryStream(data);
-                _slapPlayer.Load();
-                _slapPlayer.Play();
-                int dur = _soundDurations.ContainsKey(path) ? _soundDurations[path] : 3000;
-                _customSoundBusyUntil = Game.GameTime + dur + 50;
-            }
-            catch { }
+            if (path == null || !_bjWavData.TryGetValue(path, out data)) return;
+            // Speed controls start cadence. Each clip finishes on its own output device.
+            if (!_waveMixer.Play(data, "slap")) ReportWavePlaybackError();
         }
 
-        /// <summary>Play a kissing WAV without replacing another active WAV.</summary>
+        /// <summary>Start a kissing clip independently from other WAV effects.</summary>
         private void PlayKissSound(string path)
         {
-            if (path == null || Game.GameTime < _customSoundBusyUntil) return;
             byte[] data;
-            if (!_bjWavData.TryGetValue(path, out data)) return;
-            try
-            {
-                if (_kissPlayer == null) _kissPlayer = new System.Media.SoundPlayer();
-                _kissPlayer.Stream = new System.IO.MemoryStream(data);
-                _kissPlayer.Load();
-                _kissPlayer.Play();
-                int dur = _soundDurations.ContainsKey(path) ? _soundDurations[path] : 3000;
-                _customSoundBusyUntil = Game.GameTime + dur + 50;
-            }
-            catch { }
+            if (path == null || !_bjWavData.TryGetValue(path, out data)) return;
+            // Speed controls start cadence. Each clip finishes on its own output device.
+            if (!_waveMixer.Play(data, "kiss")) ReportWavePlaybackError();
         }
 
         /// <summary>Scan the sounds folder, load and volume-adjust all BJ WAV files.</summary>
@@ -18374,9 +18025,7 @@ namespace CinnamonCoffee
             _streetSitPropWaitTime = 0;
             _streetSitCategory = MenuLevel.None;
             _approachSecondChance = false;
-            try { if (_bjPlayer   != null) _bjPlayer.Stop();   } catch { }
-            try { if (_slapPlayer != null) _slapPlayer.Stop(); } catch { }
-            try { if (_kissPlayer != null) _kissPlayer.Stop(); } catch { }
+            _waveMixer.Stop(null); // Explicit interaction reset only, not a tempo change.
             _bjSoundBusyUntil = 0;
             _bjThroatPending  = false;
             _lastSlapSoundTime = 0;
@@ -18422,7 +18071,7 @@ namespace CinnamonCoffee
         private void DrawAnimationControls(string speedDisplay)
         {
             string voiceShortcut = _usingController ? masterControlModifierDisplay + "+~INPUT_FRONTEND_Y~" : "F6";
-            string actionHint = _liveVoiceMenu ? "CLOSE VOICE MENU" : "FINISH";
+            string actionHint = _liveVoiceMenu ? "CLOSE VOICE MENU" : menuLevel == MenuLevel.Finish ? "CLOSE FINISH MENU" : "FINISH MENU";
             DrawTextOnScreen("[" + MasterDisplay + "] " + actionHint + "   [" + voiceShortcut + "] PARTNER VOICE",
                 0.5f, 0.925f, 0.30f, true);
             DrawTextOnScreen("[" + SpeedDownDisplay + "/" + SpeedUpDisplay + "] SPEED   [" + SpeedResetDisplay
@@ -18462,7 +18111,7 @@ namespace CinnamonCoffee
 
             // ── Header title "CINNAMON COFFEE" — vertically centered in the header bar ──
             float hdrTextY = TOP + (HDR_H * 0.5f) - 0.014f;
-            DrawMenuText("CINNAMON COFFEE 1.1", PX + PAD, hdrTextY, W - PAD * 2f, 0.38f, true, 210, 125, 45, 255, 7);
+            DrawMenuText("CINNAMON COFFEE 1.2", PX + PAD, hdrTextY, W - PAD * 2f, 0.38f, true, 210, 125, 45, 255, 7);
 
             // ── Pass 3: redraw items on top of background ────────────────────────
             float y = TOP + HDR_H + 0.016f;
@@ -18553,6 +18202,11 @@ namespace CinnamonCoffee
         private void DrawFinishMenu(float x, ref float y, float lh)
         {
             DrawSectionHeader("FINISH", x, ref y);
+            if (HasSimpleFinishMenu())
+            {
+                DrawMenuItem("Finish", 0, x, ref y, lh);
+                return;
+            }
 
             // ── Sandbox (non-A-Life): simple 2-item menu ──
             if (!aLifeMode)
@@ -19975,3 +19629,213 @@ namespace CinnamonCoffee
         }
     }
 }
+// PCM WAVE OUTPUT
+namespace CinnamonCoffee
+{
+    // Each clip owns a waveOut device/header. Unlike SoundPlayer/PlaySound,
+    // starting another clip does not replace an existing one globally.
+    internal sealed class PcmWaveMixer : IDisposable
+    {
+        [StructLayout(LayoutKind.Sequential, Pack = 2)]
+        internal struct WaveFormat
+        {
+            public ushort FormatTag, Channels;
+            public uint SamplesPerSecond, AverageBytesPerSecond;
+            public ushort BlockAlign, BitsPerSample, ExtraSize;
+        }
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct WaveHeader
+        {
+            public IntPtr Data;
+            public uint Length, BytesRecorded;
+            public UIntPtr User;
+            public uint Flags, Loops;
+            public IntPtr Next;
+            public UIntPtr Reserved;
+        }
+        internal interface IWaveOutApi
+        {
+            uint Open(out IntPtr device, ref WaveFormat format);
+            uint Prepare(IntPtr device, IntPtr header, uint size);
+            uint Write(IntPtr device, IntPtr header, uint size);
+            uint Reset(IntPtr device);
+            uint Unprepare(IntPtr device, IntPtr header, uint size);
+            uint Close(IntPtr device);
+        }
+        private sealed class NativeWaveOutApi : IWaveOutApi
+        {
+            [DllImport("winmm.dll", EntryPoint = "waveOutOpen", ExactSpelling = true)]
+            private static extern uint OpenNative(out IntPtr device, uint id, ref WaveFormat format, IntPtr callback, IntPtr instance, uint flags);
+            [DllImport("winmm.dll", EntryPoint = "waveOutPrepareHeader", ExactSpelling = true)]
+            private static extern uint PrepareNative(IntPtr device, IntPtr header, uint size);
+            [DllImport("winmm.dll", EntryPoint = "waveOutWrite", ExactSpelling = true)]
+            private static extern uint WriteNative(IntPtr device, IntPtr header, uint size);
+            [DllImport("winmm.dll", EntryPoint = "waveOutReset", ExactSpelling = true)]
+            private static extern uint ResetNative(IntPtr device);
+            [DllImport("winmm.dll", EntryPoint = "waveOutUnprepareHeader", ExactSpelling = true)]
+            private static extern uint UnprepareNative(IntPtr device, IntPtr header, uint size);
+            [DllImport("winmm.dll", EntryPoint = "waveOutClose", ExactSpelling = true)]
+            private static extern uint CloseNative(IntPtr device);
+            public uint Open(out IntPtr device, ref WaveFormat format) { return OpenNative(out device, uint.MaxValue, ref format, IntPtr.Zero, IntPtr.Zero, 0); }
+            public uint Prepare(IntPtr device, IntPtr header, uint size) { return PrepareNative(device, header, size); }
+            public uint Write(IntPtr device, IntPtr header, uint size) { return WriteNative(device, header, size); }
+            public uint Reset(IntPtr device) { return ResetNative(device); }
+            public uint Unprepare(IntPtr device, IntPtr header, uint size) { return UnprepareNative(device, header, size); }
+            public uint Close(IntPtr device) { return CloseNative(device); }
+        }
+        private sealed class Clip
+        {
+            public IntPtr Device, Header, Data;
+            public string Channel;
+            public bool Prepared, Submitted, Stopping;
+        }
+        private static readonly uint HeaderSize = (uint)Marshal.SizeOf(typeof(WaveHeader));
+        private readonly IWaveOutApi _api;
+        private readonly int _maximumVoices;
+        private readonly List<Clip> _clips = new List<Clip>();
+        private bool _disposed;
+        public uint LastError { get; private set; }
+        public int ActiveCount { get { return _clips.Count; } }
+        public PcmWaveMixer() : this(new NativeWaveOutApi(), 8) { }
+        internal PcmWaveMixer(IWaveOutApi api, int maximumVoices)
+        {
+            if (api == null) throw new ArgumentNullException("api");
+            if (maximumVoices < 1 || maximumVoices > 32) throw new ArgumentOutOfRangeException("maximumVoices");
+            _api = api;
+            _maximumVoices = maximumVoices;
+        }
+        private static bool Parse(byte[] wav, float rate, out WaveFormat format, out int offset, out int length)
+        {
+            format = new WaveFormat(); offset = length = 0;
+            if (wav == null || wav.Length < 44 || float.IsNaN(rate) || float.IsInfinity(rate) || rate < 0.25f || rate > 4f) return false;
+            if (BitConverter.ToUInt32(wav, 0) != 0x46464952U || BitConverter.ToUInt32(wav, 8) != 0x45564157U) return false;
+            long limit = (long)BitConverter.ToUInt32(wav, 4) + 8;
+            if (limit > wav.Length || limit < 12) return false;
+            bool foundFormat = false, foundData = false;
+            for (long position = 12; position + 8 <= limit; )
+            {
+                int p = (int)position;
+                uint tag = BitConverter.ToUInt32(wav, p), size = BitConverter.ToUInt32(wav, p + 4);
+                long end = position + 8 + size;
+                if (end > limit || size > int.MaxValue) return false;
+                if (tag == 0x20746D66U && !foundFormat)
+                {
+                    if (size < 16) return false;
+                    format.FormatTag = BitConverter.ToUInt16(wav, p + 8);
+                    format.Channels = BitConverter.ToUInt16(wav, p + 10);
+                    uint sampleRate = BitConverter.ToUInt32(wav, p + 12);
+                    uint originalAverage = BitConverter.ToUInt32(wav, p + 16);
+                    format.BlockAlign = BitConverter.ToUInt16(wav, p + 20);
+                    format.BitsPerSample = BitConverter.ToUInt16(wav, p + 22);
+                    if (format.FormatTag != 1 || format.Channels < 1 || format.Channels > 2 || sampleRate < 8000 || sampleRate > 192000) return false;
+                    if (format.BitsPerSample != 8 && format.BitsPerSample != 16 && format.BitsPerSample != 24 && format.BitsPerSample != 32) return false;
+                    if (format.BlockAlign != format.Channels * (format.BitsPerSample / 8) || originalAverage != sampleRate * format.BlockAlign) return false;
+                    format.SamplesPerSecond = (uint)Math.Round(sampleRate * (double)rate);
+                    format.AverageBytesPerSecond = format.SamplesPerSecond * format.BlockAlign;
+                    foundFormat = true;
+                }
+                else if (tag == 0x61746164U && !foundData)
+                {
+                    offset = p + 8; length = (int)size; foundData = true;
+                }
+                position = end + (size & 1U);
+                if (position > limit) return false;
+            }
+            return foundFormat && foundData && length > 0 && length % format.BlockAlign == 0;
+        }
+        public bool Play(byte[] wav, string channel, float playbackRate = 1f)
+        {
+            if (_disposed || (channel != "bj" && channel != "slap" && channel != "kiss")) return false;
+            Tick();
+            if (_clips.Count >= _maximumVoices) return false; // Never steal or truncate an active clip.
+            WaveFormat format; int offset, length;
+            if (!Parse(wav, playbackRate, out format, out offset, out length)) return false;
+            Clip clip = new Clip { Channel = channel };
+            bool success = false;
+            try
+            {
+                clip.Data = Marshal.AllocHGlobal(length);
+                Marshal.Copy(wav, offset, clip.Data, length);
+                clip.Header = Marshal.AllocHGlobal((int)HeaderSize);
+                WaveHeader header = new WaveHeader { Data = clip.Data, Length = (uint)length };
+                Marshal.StructureToPtr(header, clip.Header, false);
+                LastError = _api.Open(out clip.Device, ref format);
+                if (LastError != 0) { clip.Device = IntPtr.Zero; return false; } // Handle is valid only on success.
+                LastError = _api.Prepare(clip.Device, clip.Header, HeaderSize);
+                if (LastError != 0) return false;
+                clip.Prepared = true;
+                LastError = _api.Write(clip.Device, clip.Header, HeaderSize);
+                if (LastError != 0) return false;
+                clip.Submitted = true;
+                _clips.Add(clip); success = true; return true;
+            }
+            catch (Exception) { LastError = uint.MaxValue; return false; }
+            finally
+            {
+                if (!success)
+                {
+                    clip.Stopping = true;
+                    uint operationError = LastError;
+                    if (!Release(clip, true)) _clips.Add(clip); // Retain native-owned memory until released.
+                    if (operationError != 0) LastError = operationError;
+                }
+            }
+        }
+        private bool Release(Clip clip, bool stop)
+        {
+            try
+            {
+                if (stop && clip.Device != IntPtr.Zero && clip.Submitted)
+                {
+                    LastError = _api.Reset(clip.Device);
+                    if (LastError != 0) return false;
+                    clip.Submitted = false;
+                }
+                if (clip.Prepared)
+                {
+                    LastError = _api.Unprepare(clip.Device, clip.Header, HeaderSize);
+                    if (LastError != 0) return false;
+                    clip.Prepared = false;
+                }
+                if (clip.Header != IntPtr.Zero) { Marshal.FreeHGlobal(clip.Header); clip.Header = IntPtr.Zero; }
+                if (clip.Data != IntPtr.Zero) { Marshal.FreeHGlobal(clip.Data); clip.Data = IntPtr.Zero; }
+                if (clip.Device != IntPtr.Zero)
+                {
+                    LastError = _api.Close(clip.Device);
+                    if (LastError != 0) return false;
+                    clip.Device = IntPtr.Zero;
+                }
+                return true;
+            }
+            catch (Exception) { LastError = uint.MaxValue; return false; }
+        }
+        public void Tick()
+        {
+            // Also permits deferred driver cleanup after Dispose; never free an in-flight header.
+            for (int i = _clips.Count - 1; i >= 0; i--)
+            {
+                Clip clip = _clips[i];
+                bool done = clip.Header == IntPtr.Zero || (((WaveHeader)Marshal.PtrToStructure(clip.Header, typeof(WaveHeader))).Flags & 1U) != 0;
+                if ((clip.Stopping || done) && Release(clip, clip.Stopping)) _clips.RemoveAt(i);
+            }
+        }
+        public bool IsPlaying(string channel)
+        {
+            Tick();
+            foreach (Clip clip in _clips) if (clip.Channel == channel) return true;
+            return false;
+        }
+        public void Stop(string channel)
+        {
+            for (int i = _clips.Count - 1; i >= 0; i--)
+            {
+                Clip clip = _clips[i];
+                if (channel != null && clip.Channel != channel) continue;
+                clip.Stopping = true;
+                if (Release(clip, true)) _clips.RemoveAt(i);
+            }
+        }
+        public void Dispose() { _disposed = true; Stop(null); }
+    }
+}
+// END PCM WAVE OUTPUT

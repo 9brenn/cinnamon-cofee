@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Exercise extracted real GTA audio/menu methods with deterministic native mocks.
+"""Exercise extracted GTA audio/menu methods with adversarial engine responses.
 
 Requires the .NET 8 SDK; accepts an optional path to dotnet. Compilation against
-real SHVDN/.NET Framework is a separate check. These tests do not run GTA V or
-prove that its voice recordings are audible on a particular game build.
+real SHVDN/.NET Framework is a separate check. These tests distinguish launch requests from simulated accepted playback, and
+exercise diagnostic hash mismatches, rejected or late starts, and flag gaps.
+The PcmWaveMixer boundary is simulated here; its WinMM lifecycle is tested in
+verify_wave_engine.py. GTA V is not run and in-game audibility is not established.
 """
 from pathlib import Path
 import json
@@ -26,11 +28,11 @@ def method(signature):
     return source[start:end]
 methods = '\n'.join(method(signature) for signature in (
     'private void AssignHookerVoice(Ped ped)',
-    'private void PlayPedSpeech(Ped ped, string speechName)',
-    'private void PlayMoaningSounds()',
+    re.search(r'private (?:void|bool) PlayPedSpeech\(Ped ped, string speechName\)',source).group(0),
+    re.search(r'private (?:void|bool) PlayMoaningSounds\(\)',source).group(0),
     'private void TickPostSexVoice()',
     'private void TickCustomSound()',
-    'private void PlayBjCustom(string path, bool force = false)',
+    'private bool PlayBjCustom(string path, bool force = false)',
     'private void PlaySlapSound(string path)',
     'private void PlayKissSound(string path)',
 ))
@@ -38,6 +40,8 @@ voices = 'private static readonly string[] HOOKER_VOICES = {' + source.split('pr
 finish_condition = source.split('if (masterTriggered && keyCooldown == 0 && !_liveVoiceMenu', 1)[1].split(')', 1)[0]
 finish_gate = 'private bool TestFinishGate(bool masterTriggered) { return masterTriggered && keyCooldown == 0 && !_liveVoiceMenu' + finish_condition + '; }'
 periodic = 'private void TickPeriodic() {' + source.split('// Animation speed controls request cadence, never the duration of a speech line.', 1)[1].split('// Custom BJ sounds', 1)[0] + '}\n'
+effects = 'private void TickEffects() { int now=Game.GameTime; '+source.split('// Sex slap sounds —',1)[1].split('// Slow healing during loop phase',1)[0].split('bool _standingFinishInsideSlap',1)[1]+'}'
+effects=effects.replace(' { int now=Game.GameTime; ',' { int now=Game.GameTime; bool _standingFinishInsideSlap',1)
 # Wiring checks supplement executable tests, because complete game input methods
 # involve hundreds of unrelated calls and cannot run outside the game.
 wiring = {
@@ -49,8 +53,11 @@ wiring = {
     'tick drives scheduler': 'TickPartnerAudio(); // Apply a requested voice only between complete speech lines.',
     'tick polls menu hotkey': 'PollLiveVoiceMenuToggle();',
     'full reset cancels pending audio': 'ResetPartnerAudio();\n            _girlCurrentVoice     = null;',
-    'WAV scheduling observes speech/pending': 'bool gtaSpeechActive = IsPartnerSpeechBusy(girl) || HasQueuedPartnerSpeech() || _pendingPartnerVoiceChange;',
+    'BJ scheduling observes own channel': 'if (now - _lastBjSoundTime > bjInterval && !_waveMixer.IsPlaying("bj") && _queuedCustomSoundPath == null)',
 }
+bj_producer=source.split('// Custom BJ sounds',1)[1].split('// Sex slap sounds',1)[0]
+assert 'IsPartnerSpeechBusy' not in bj_producer, 'native speech must not gate normal WAV producer'
+assert 'System.Media.SoundPlayer' not in source, 'global SoundPlayer path must not return'
 for label, text in wiring.items():
     assert text in source, label
 
@@ -81,9 +88,13 @@ enum Hash : ulong {
 }
 static class Function {
     public static int Duration = 5000, Delay, VoiceSets, Stops, FalseFrom, FalseUntil, VoiceSetFailures;
-    public static bool Modifier, ControllerY, MasterControl;
+    public static bool Modifier, ControllerY, MasterControl, AnySpeechAlways, WrongVoiceHash, RejectEveryLaunch;
+    // Launch requests and simulated accepted starts are deliberately separate.
     public static List<string> Spoken = new List<string>();
+    public static List<string> RequestedBanks = new List<string>();
+    public static List<int> RequestTimes = new List<int>(), StartTimes = new List<int>();
     public static List<string> SpeechParameters = new List<string>();
+    public static List<bool> DirectorFlags=new List<bool>();
     public static uint Key(string name) {
         uint value = 0;
         foreach (char c in name.ToLowerInvariant()) {
@@ -93,14 +104,18 @@ static class Function {
         return value;
     }
     public static void Reset() {
-        Spoken.Clear(); SpeechParameters.Clear(); Duration=5000; Delay=VoiceSets=Stops=FalseFrom=FalseUntil=VoiceSetFailures=0; Modifier=ControllerY=false;
+        Spoken.Clear(); SpeechParameters.Clear(); DirectorFlags.Clear(); RequestedBanks.Clear(); RequestTimes.Clear(); StartTimes.Clear(); AnySpeechAlways=WrongVoiceHash=RejectEveryLaunch=false; Duration=5000; Delay=VoiceSets=Stops=FalseFrom=FalseUntil=VoiceSetFailures=0; Modifier=ControllerY=false;
         Game.GameTime=1000; Game.KeyDown=Game.MasterDown=false; MasterControl=false;
     }
     public static void Call(Hash native, params object[] args) {
-        if (native == Hash.SET_AMBIENT_VOICE_NAME) { if(VoiceSetFailures>0) VoiceSetFailures--; else ((Ped)args[0]).Voice = (string)args[1]; VoiceSets++; }
+        if(native==Hash.SET_AUDIO_FLAG && (string)args[0]=="IsDirectorModeActive") DirectorFlags.Add((bool)args[1]);
+        else if (native == Hash.SET_AMBIENT_VOICE_NAME) { if(VoiceSetFailures>0) VoiceSetFailures--; else ((Ped)args[0]).Voice = (string)args[1]; VoiceSets++; }
         else if (native == Hash.STOP_CURRENT_PLAYING_AMBIENT_SPEECH) { Stops++; ((Ped)args[0]).SpeakingUntil=0; }
         else if ((ulong)native == 0x3523634255FC3318UL || native == Hash.PLAY_PED_AMBIENT_SPEECH_NATIVE) {
-            Ped ped=(Ped)args[0]; ped.VisibleFrom=Game.GameTime+Delay; ped.SpeakingUntil=Game.GameTime+Duration;
+            Ped ped=(Ped)args[0];
+            RequestTimes.Add(Game.GameTime);
+            RequestedBanks.Add((ulong)native==0x3523634255FC3318UL ? (string)args[2] : "");
+            if(!RejectEveryLaunch) { ped.VisibleFrom=Game.GameTime+Delay; ped.SpeakingUntil=ped.VisibleFrom+Duration; StartTimes.Add(ped.VisibleFrom); }
             Spoken.Add((string)args[1]); SpeechParameters.Add((string)args[(ulong)native==0x3523634255FC3318UL ? 3 : 2]);
         }
     }
@@ -108,32 +123,41 @@ static class Function {
         object value;
         if (native == Hash.GET_HASH_KEY) {
             uint hash = Key((string)args[0]); value = typeof(T) == typeof(uint) ? (object)hash : (object)unchecked((int)hash);
-        } else if ((ulong)native == 0x5E203DA2BA15D436UL) value = Key(((Ped)args[0]).Voice);
-        else if ((ulong)native == 0x729072355FA39EC9UL) {
-            Ped ped=(Ped)args[0]; value=Game.GameTime>=ped.VisibleFrom && Game.GameTime<ped.SpeakingUntil && !(Game.GameTime>=FalseFrom && Game.GameTime<FalseUntil);
+        } else if ((ulong)native == 0x5E203DA2BA15D436UL) value = Key(WrongVoiceHash ? "UNRELIABLE_READBACK" : ((Ped)args[0]).Voice);
+        else if ((ulong)native == 0x729072355FA39EC9UL || (ulong)native == 0x9072C8B49907BFADUL) {
+            Ped ped=(Ped)args[0]; value=((ulong)native==0x729072355FA39EC9UL && AnySpeechAlways) || (Game.GameTime>=ped.VisibleFrom && Game.GameTime<ped.SpeakingUntil && !(Game.GameTime>=FalseFrom && Game.GameTime<FalseUntil));
         } else if (native == Hash.IS_DISABLED_CONTROL_PRESSED) value=(int)args[1]==1 ? Modifier : MasterControl;
         else if (native == Hash.IS_DISABLED_CONTROL_JUST_PRESSED) value=ControllerY;
         else throw new Exception("Unexpected native: " + native);
         return (T)value;
     }
 }
-namespace System.Media {
-    class SoundPlayer {
-        public static int Plays, Stops, Interruptions, EngineUntil, Duration=400;
-        public System.IO.Stream Stream;
-        public void Load() { }
-        public void Stop() { Stops++; EngineUntil=0; }
-        public void Play() { if(Game.GameTime<EngineUntil) Interruptions++; Plays++; EngineUntil=Game.GameTime+Duration; }
-        public static void Reset() { Plays=Stops=Interruptions=EngineUntil=0;Duration=400; }
+// Engine boundary only: actual WinMM/PcmWaveMixer lifecycle has its own tests.
+class PcmWaveMixer {
+    public class Clip { public string Channel; public int Start,Until;public float Rate; }
+    public List<Clip> Clips=new List<Clip>();public int Stops;
+    public bool Play(byte[] data,string channel,float rate=1f) { Clips.Add(new Clip{Channel=channel,Start=Game.GameTime,Until=Game.GameTime+400,Rate=rate});return true; }
+    public bool IsPlaying(string channel) { return Clips.Exists(c=>c.Channel==channel && Game.GameTime<c.Until); }
+    public void Tick() { }
+    public void Stop(string channel) { Stops++; }
+}
+class CountingRandom : Random {
+    public int GapDraws; public List<int> Gaps=new List<int>();
+    public CountingRandom():base(42) { }
+    public override int Next(int min,int max) {
+        int value=base.Next(min,max);
+        if(min==2000 && max>=5000 && max<=5001) { GapDraws++;Gaps.Add(value); }
+        return value;
     }
 }
 class Harness {
     enum ScriptState { Idle, Approaching, Animating }
+    enum Mode { Car,Street }
     enum MenuLevel { None, Main, PartnerVoices, Services }
     class ALifePedData { public string Voice; public int Reputation; }
     private static readonly Dictionary<int,string> voiceCache = new Dictionary<int,string>();
     private Dictionary<string,ALifePedData> _aLifePeds = new Dictionary<string,ALifePedData>();
-    private Random rng = new Random(42);
+    private CountingRandom rng = new CountingRandom();
     private Ped girl; private bool hasGirl=true, aLifeMode, sandboxMode=true;
     private int menuIndex, keyCooldown, _menuControlCooldown, _voiceReapplyAt;
     private const int KEY_COOLDOWN_FRAMES=12, VOICE_INTERVAL=7000;
@@ -149,9 +173,13 @@ class Harness {
     private bool femaleMoanVoice=true, femaleEndVoice=true;
     private int lastVoiceTime, _postSexPhase, _postSexWaitUntil;
     private MenuLevel menuLevel=MenuLevel.None, _postSexPendingMenu=MenuLevel.None;
-    private System.Media.SoundPlayer _bjPlayer,_slapPlayer,_kissPlayer;
+    private readonly PcmWaveMixer _waveMixer=new PcmWaveMixer();
     private Dictionary<string,byte[]> _bjWavData=new Dictionary<string,byte[]>();
     private Dictionary<string,int> _soundDurations=new Dictionary<string,int>();
+    private bool slapSoundsEnabled=true,_finishInside;private Mode mode=Mode.Street;private int streetActionIdx=5,_lastSlapSoundTime,_lastKissSoundTime;
+    private string[] _sexSlapFiles=new[]{"clip"},_kissSoundFiles=new[]{"clip"};
+    private void ReportWavePlaybackError() { throw new Exception("unexpected simulated mixer failure"); }
+    private void GetSlapIntervals(out int slow,out int mid,out int fast) { slow=600;mid=350;fast=180; }
     private string GetPedFingerprint(Ped ped) { return "FP" + ped.Handle; }
     private string ALifeKey(string fp) { return "AL:" + fp; }
     private bool IsProstHookerModel(Ped ped) { return false; }
@@ -169,103 +197,115 @@ class Harness {
     private void DrawMenuItem(string text,int index,float x,ref float y,float lh,float scale=0.31f) { }
 '''
 tests = r'''
-    static int count;
-    static void Check(bool condition,string message) { count++; if(!condition) throw new Exception("FAIL "+message); }
+    static int count,failures;
+    static void Check(bool condition,string message) { count++; if(!condition) { failures++;Console.WriteLine("FAIL "+message); } }
+    static void Run(Harness h,int first,int last,bool loops=true) {
+        for(int t=first;t<=last;t+=50) { Game.GameTime=t; h.TickPartnerAudio(); if(loops) h.TickPeriodic(); }
+    }
     static Harness New(bool native=false) {
-        Function.Reset(); System.Media.SoundPlayer.Reset(); voiceCache.Clear(); var h=new Harness();
+        Function.Reset(); voiceCache.Clear(); var h=new Harness();
         h.girl=new Ped { Handle=42, Model=new Model { Hash=unchecked((int)Function.Key(native?"s_f_y_hooker_01":"a_f_y_bevhills_01")) } };
         h.girl.Voice=HOOKER_VOICES[2]; h.LoadPartnerVoiceCatalogue(); return h;
     }
     public static void Main() {
         var h=New();
         Check(h._partnerVoices.Count==8,"eight confirmed voice entries only");
-        Check(NormalizePartnerVoice("S_F_Y_HOOKER_03_BLACK_FULL_02")==null,"unconfirmed ninth bank excluded");
-        Check(NormalizePartnerVoice("AMANDA")==null,"other banks rejected");
+        Check(NormalizePartnerVoice("S_F_Y_HOOKER_03_BLACK_FULL_02")==null,"unconfirmed bank excluded");
+        Check(NormalizePartnerVoice("AMANDA")==null,"unrequested banks rejected");
         Check(NormalizePartnerVoice("  "+HOOKER_VOICES[0].ToLowerInvariant()+"  ")==HOOKER_VOICES[0],"valid IDs normalized");
-        h.SelectPartnerVoice(HOOKER_VOICES[0]);
-        Check(h._pendingPartnerVoiceChange && h._appliedPartnerVoice=="","SET alone does not claim confirmed bank");
-        h.TickPartnerAudio();
-        Check(!h._pendingPartnerVoiceChange && h._appliedPartnerVoice==HOOKER_VOICES[0],"following tick confirms engine hash");
-        h.PlayPedSpeech(h.girl,"SEX_GENERIC");
+
+        // A never-matching diagnostic hash must not prevent explicit-bank requests forever.
+        h=New();Function.WrongVoiceHash=true;h.SelectPartnerVoice(HOOKER_VOICES[7]);Run(h,1000,15000);
+        Check(Function.StartTimes.Count>0,"permanent voice hash mismatch cannot starve native requests for15seconds");
+        Check(Function.RequestedBanks.Count>0 && Function.RequestedBanks.TrueForAll(v=>v==HOOKER_VOICES[7]),"explicit requested bank reaches native despite readback mismatch");
+        Check(Function.RequestTimes.Count<20,"hash mismatch recovery does not generate per-frame launches");
+        Check(h._voiceReadbackAttempts==3 && !h._voiceAwaitingReadback,"diagnostic hash readback stops after bounded three attempts");
+
+        // IS_ANY_SPEECH_PLAYING may report unrelated/persistent state; no owned line exists here.
+        h=New();Function.AnySpeechAlways=true;Run(h,1000,15000);
+        Check(Function.StartTimes.Count>0,"unowned stuck ANY_SPEECH flag cannot cause minutes of silence");
+
+        // Calls may be rejected by GTA without ever setting the actual ambient-speech flag.
+        h=New();Function.RejectEveryLaunch=true;Run(h,1000,31000);
+        Check(Function.StartTimes.Count==0 && Function.Spoken.Count>1,"rejected launches exercise retry path without simulating successful playback");
+        Check(Function.RequestTimes.Count<=20,"rejected launch retries are bounded rather than every frame");
+        Check(Function.RequestTimes.Count>1 && Function.RequestTimes[1]-Function.RequestTimes[0]<=5000,"rejected first launch recovers without fake full-line cooldown");
+        Check(h.rng.GapDraws==0,"rejected starts never draw completed-line random gaps");
+
+        // Accepted lines last5000ms. Their next request must follow actual completion by2–5s.
+        h=New();h.SelectPartnerVoice(HOOKER_VOICES[0]);Run(h,1000,1500,false);Game.GameTime=2000;h.PlayPedSpeech(h.girl,"SEX_GENERIC");
         int initialSets=Function.VoiceSets;
-        for(int t=1100;t<6000;t+=100) { Game.GameTime=t; h.TickPartnerAudio(); h.TickPeriodic(); h.AssignHookerVoice(h.girl); }
-        Check(Function.SpeechParameters[0]=="SPEECH_PARAMS_ALLOW_REPEAT","native request uses non-forcing repeat parameters");
-        Check(Function.Spoken.Count==1 && Function.Stops==0,"5000ms line survives speed3 cadence without stop/relaunch");
-        Check(Function.VoiceSets==initialSets,"no voice-name reapply while line active");
-        Check(h._queuedSpeechName==null,"ordinary loop requests not queued");
-        Game.GameTime=6000;h.TickPartnerAudio();h.TickPeriodic();
-        Check(Function.Spoken.Count==1 && h.IsPartnerSpeechBusy(h.girl),"first false speech sample begins quiet confirmation");
-        Game.GameTime=6449;h.TickPartnerAudio();h.TickPeriodic();Check(Function.Spoken.Count==1,"450ms quiet guard prevents early relaunch");
-        Game.GameTime=6450;h.TickPartnerAudio();h.TickPeriodic();
-        Check(Function.Spoken.Count==1 && !h.IsPartnerSpeechBusy(h.girl),"quiet completion starts a separate cadence delay");
-        Game.GameTime=13449;h.TickPartnerAudio();h.TickPeriodic();Check(Function.Spoken.Count==1,"speed3 does not shorten seven-second post-line gap");
-        Game.GameTime=13450;h.TickPartnerAudio();h.TickPeriodic();Check(Function.Spoken.Count==2,"next periodic request starts after full independent gap");
+        Run(h,2050,6950);
+        Check(Function.Spoken.Count==1 && Function.Stops==0,"5000ms accepted line stays whole at animation speed3");
+        Check(Function.VoiceSets==initialSets,"active native line gets no bank reapply");
+        Check(Function.DirectorFlags.Count==1 && Function.DirectorFlags[0],"interaction audio flag remains active across whole native line");
+        for(int t=7000;t<=40000 && Function.StartTimes.Count<3;t+=50) { Game.GameTime=t;h.TickPartnerAudio();h.TickPeriodic(); }
+        Check(Function.StartTimes.Count==3,"three complete accepted native lines are scheduled");
+        for(int i=1;i<Function.StartTimes.Count;i++) {
+            int gap=Function.StartTimes[i]-Function.StartTimes[i-1]-Function.Duration;
+            Check(gap>=2000 && gap<=5050,"observed post-line gap remains2–5seconds independent of speed");
+        }
+        Check(h.rng.GapDraws==2,"exactly one randomized gap is drawn for each completed accepted line");
+        Check(Function.SpeechParameters.Count>0 && Function.SpeechParameters.TrueForAll(v=>v=="SPEECH_PARAMS_ALLOW_REPEAT"),"native requests use non-forcing repeat parameters");
+
+        h=New();h.PlayPedSpeech(h.girl,"GENERIC_HI");Run(h,1050,7000,false);
+        int savedDue=h._nextPartnerLoopSpeechAt;int savedDraws=h.rng.GapDraws;
+        Function.AnySpeechAlways=true;h.girl.VisibleFrom=7050;h.girl.SpeakingUntil=7350;Run(h,7050,7850,false);
+        Check(savedDraws==1 && h.rng.GapDraws==savedDraws,"background-only speech cannot redraw completed-line gap");
+        Check(h._nextPartnerLoopSpeechAt==savedDue,"background speech cannot postpone scheduled next line");
+
+        h=New();h._bjSoundBusyUntil=200000;Run(h,1000,8000);
+        Check(Function.StartTimes.Count>0,"native speech cadence never waits for WAV reservation");
 
         h=New();Function.Delay=400;h.PlayPedSpeech(h.girl,"GENERIC_HI");Game.GameTime=1350;h.PlayPedSpeech(h.girl,"SEX_GENERIC");
-        Check(h.IsPartnerSpeechBusy(h.girl) && Function.Spoken.Count==1,"600ms launch grace covers delayed native startup");
+        Check(Function.Spoken.Count==1,"delayed native startup cannot trigger overlapping second request");
+        h=New();Function.Delay=1600;h.PlayPedSpeech(h.girl,"GENERIC_HI");Run(h,1050,12600);
+        Check(h.rng.GapDraws==1,"late native acknowledgement still records one real completed line");
+        Check(Function.RequestTimes.Count>=2 && Function.RequestTimes[1]-(1000+1600+Function.Duration)>=2000,"late-started full native line still receives post-line gap before next request");
         h=New(true);h.PlayPedSpeech(h.girl,"GENERIC_HI");initialSets=Function.VoiceSets;
-        Game.GameTime=1500;h.SelectPartnerVoice(HOOKER_VOICES[0]);h.SelectPartnerVoice(HOOKER_VOICES[7]);
-        Check(h._pendingPartnerVoiceChange && Function.VoiceSets==initialSets,"active-line selections defer bank writes");
-        Check(h.partnerVoice==HOOKER_VOICES[7] && h.settingsSaved==2,"last pending selection wins and persists");
-        Game.GameTime=6000;h.TickPartnerAudio();Game.GameTime=6450;h.TickPartnerAudio();
-        Check(h._pendingPartnerVoiceChange && h._voiceAwaitingReadback && h.girl.Voice==HOOKER_VOICES[7],"line-end bank write waits for readback");
-        Game.GameTime=6451;h.TickPartnerAudio();
-        Check(!h._pendingPartnerVoiceChange && h._appliedPartnerVoice==HOOKER_VOICES[7],"last selected bank confirmed after completion");
-        Check(h._nativeVoiceBeforeOverride==HOOKER_VOICES[2],"original native bank captured");
-        h.SelectPartnerVoice("");h.TickPartnerAudio();
-        Check(h.girl.Voice==HOOKER_VOICES[2] && h._voiceOverridePedHandle==0,"automatic restores captured native bank");
-
-        h=New();Function.VoiceSetFailures=1;h.SelectPartnerVoice(HOOKER_VOICES[7]);
-        Check(h._pendingPartnerVoiceChange && h.girl.Voice!=HOOKER_VOICES[7],"ignored engine SET is not marked confirmed");
-        h.PlayPedSpeech(h.girl,"SEX_GENERIC");Check(Function.Spoken.Count==0,"speech waits while requested bank is unconfirmed");
-        Game.GameTime=1499;h.TickPartnerAudio();Check(Function.VoiceSets==1 && h._appliedPartnerVoice=="","failed readback waits for500ms retry");
-        Game.GameTime=1500;h.TickPartnerAudio();Check(Function.VoiceSets==2 && h._pendingPartnerVoiceChange,"retry writes bank without false early confirmation");
-        Game.GameTime=1501;h.TickPartnerAudio();Check(!h._pendingPartnerVoiceChange && h._appliedPartnerVoice==HOOKER_VOICES[7],"retry confirms actual engine hash");
+        Function.FalseFrom=4000;Function.FalseUntil=4300;
+        for(int t=3500;t<=4400;t+=50) {
+            Game.GameTime=t;if(t==4100)h.SelectPartnerVoice(HOOKER_VOICES[7]);h.TickPartnerAudio();h.TickPeriodic();
+        }
+        Check(Function.Spoken.Count==1 && Function.VoiceSets==initialSets,"temporary speech flag gap cannot replace current line or bank");
+        Run(h,4450,7000,false);
+        Check(h.partnerVoice==HOOKER_VOICES[7] && h.girl.Voice==HOOKER_VOICES[7],"last pending bank applies after complete native line");
+        h.SelectPartnerVoice("");Run(h,7050,8000,false);
+        Check(h.girl.Voice==HOOKER_VOICES[2],"automatic restores captured native bank");
 
         h=New();h.aLifeMode=true;h.GetOrCreateALifeData(h.girl).Voice=HOOKER_VOICES[4];
-        h.SelectPartnerVoice(HOOKER_VOICES[0]);h.TickPartnerAudio();
-        Check(h.GetOrCreateALifeData(h.girl).Voice==HOOKER_VOICES[4] && h.aLifeSaved==0,"override preserves A-Life voice");
-        h.PlayPedSpeech(h.girl,"GENERIC_HI");h.SelectPartnerVoice("");
-        Game.GameTime=6000;h.TickPartnerAudio();Game.GameTime=6450;h.TickPartnerAudio();Game.GameTime=6451;h.TickPartnerAudio();
-        Check(h.girl.Voice==HOOKER_VOICES[4] && !h._pendingPartnerVoiceChange,"automatic restores A-Life bank after full quiet+readback");
-        h=New();voiceCache[42]=HOOKER_VOICES[5];h.SelectPartnerVoice(HOOKER_VOICES[0]);h.TickPartnerAudio();h.SelectPartnerVoice("");h.TickPartnerAudio();
+        h.SelectPartnerVoice(HOOKER_VOICES[0]);Run(h,1000,1500,false);h.SelectPartnerVoice("");Run(h,1550,2500,false);
+        Check(h.girl.Voice==HOOKER_VOICES[4] && h.GetOrCreateALifeData(h.girl).Voice==HOOKER_VOICES[4],"automatic preserves A-Life voice");
+        h=New();voiceCache[42]=HOOKER_VOICES[5];h.SelectPartnerVoice(HOOKER_VOICES[0]);Run(h,1000,1500,false);h.SelectPartnerVoice("");Run(h,1550,2500,false);
         Check(h.girl.Voice==HOOKER_VOICES[5],"automatic preserves sandbox cache");
 
-        h=New();h.PlayPedSpeech(h.girl,"GENERIC_HI");
-        h.PlayPedSpeech(h.girl,"HOOKER_OFFER_SERVICE");h.PlayPedSpeech(h.girl,"HOOKER_OFFER_AGAIN");h.PlayPedSpeech(h.girl,"SEX_FINISHED");h.PlayPedSpeech(h.girl,"GENERIC_YES");h.PlayPedSpeech(h.girl,"SEX_GENERIC");
-        Check(h._queuedSpeechName=="SEX_FINISHED" && Function.Spoken.Count==1,"single bounded pending line keeps finish priority");
+        h=New();h.PlayPedSpeech(h.girl,"GENERIC_HI");h.PlayPedSpeech(h.girl,"HOOKER_OFFER_SERVICE");h.PlayPedSpeech(h.girl,"HOOKER_OFFER_AGAIN");h.PlayPedSpeech(h.girl,"SEX_FINISHED");h.PlayPedSpeech(h.girl,"GENERIC_YES");h.PlayPedSpeech(h.girl,"SEX_GENERIC");
+        Check(h._queuedSpeechName=="SEX_FINISHED" && Function.Spoken.Count==1,"single pending important line retains finish priority");
         h._postSexPhase=1;h._postSexPendingMenu=MenuLevel.Services;
-        Game.GameTime=6000;h.TickPartnerAudio();h.TickPostSexVoice();Check(h._postSexPhase==1,"finish state waits quiet and pending finish");
-        Game.GameTime=6450;h.TickPartnerAudio();h.TickPostSexVoice();
-        Check(Function.Spoken.Count==2 && Function.Spoken[1]=="SEX_FINISHED" && h._postSexPhase==1,"queued finish starts before post state advances");
-        Game.GameTime=11450;h.TickPartnerAudio();h.TickPostSexVoice();Check(h._postSexPhase==1,"finish completion still waits stable quiet");
-        Game.GameTime=11900;h.TickPartnerAudio();h.TickPostSexVoice();Check(h._postSexPhase==2,"post state advances after complete queued finish");
-        Game.GameTime=12399;h.TickPartnerAudio();h.TickPostSexVoice();Check(Function.Spoken.Count==2,"post sequence preserves followup interval");
-        Game.GameTime=12400;h.TickPartnerAudio();h.TickPostSexVoice();
-        Check(h._postSexPhase==0 && Function.Spoken.Count==3 && Function.Spoken[2]=="HOOKER_OFFER_AGAIN" && h.menuLevel==MenuLevel.Services,"followup and deferred menu preserved");
-
-        h=New();h._bjThroatPending=true;h.PlayPedSpeech(h.girl,"SEX_GENERIC");Check(Function.Spoken.Count==0 && !h.HasQueuedPartnerSpeech(),"throat pending drops stale periodic request");
-        h.PlayPedSpeech(h.girl,"SEX_FINISHED");h.TickPartnerAudio();Check(h.HasQueuedPartnerSpeech() && Function.Spoken.Count==0,"important speech waits throat pending");
-        h._bjThroatPending=false;h._throatLockAt=1;h.TickPartnerAudio();Check(Function.Spoken.Count==0,"throat timestamp lock blocks speech");
-        h._throatLockAt=0;h._throatSpeedLocked=true;h.TickPartnerAudio();Check(Function.Spoken.Count==0,"throat speed lock blocks speech");
-        h._throatSpeedLocked=false;h.TickPartnerAudio();Check(Function.Spoken.Count==1 && !h.HasQueuedPartnerSpeech(),"important speech resumes after unlock");
+        for(int t=1050;t<=18000 && h._postSexPhase!=0;t+=50) { Game.GameTime=t;h.TickPartnerAudio();h.TickPostSexVoice(); }
+        Check(Function.Spoken.Count>=3 && Function.Spoken[1]=="SEX_FINISHED" && Function.Spoken[2]=="HOOKER_OFFER_AGAIN" && h.menuLevel==MenuLevel.Services,"finish line stays before followup and deferred menu");
+        h=New();h._bjThroatPending=true;h.PlayPedSpeech(h.girl,"SEX_GENERIC");h.PlayPedSpeech(h.girl,"SEX_FINISHED");h.TickPartnerAudio();
+        Check(Function.Spoken.Count==1 && h.HasQueuedPartnerSpeech(),"native speech remains independent of custom throat audio locks");
 
         h=New();h._bjWavData["clip"]=new byte[16];h._soundDurations["clip"]=400;
-        h.PlayBjCustom("clip");Check(System.Media.SoundPlayer.Plays==1 && h._customSoundBusyUntil==1450,"400ms clip reserves shared channel plus50ms");
-        Game.GameTime=1180;h.PlaySlapSound("clip");h.PlayKissSound("clip");h.PlayBjCustom("clip");
-        Check(System.Media.SoundPlayer.Plays==1 && System.Media.SoundPlayer.Stops==0 && System.Media.SoundPlayer.Interruptions==0,"180ms cadence cannot restart/stop shared400ms clip");
-        Game.GameTime=1449;h.PlaySlapSound("clip");Check(System.Media.SoundPlayer.Plays==1,"next player waits for full shared reservation");
-        Game.GameTime=1450;h.PlaySlapSound("clip");Check(System.Media.SoundPlayer.Plays==2 && System.Media.SoundPlayer.Interruptions==0,"next channel play starts after full duration");
-        Game.GameTime=1630;h.PlayKissSound("clip");Check(System.Media.SoundPlayer.Plays==2,"different player shares same channel guard");
-        h.PlayBjCustom("clip",true);Check(System.Media.SoundPlayer.Stops==0 && System.Media.SoundPlayer.Plays==2 && h._queuedCustomSoundPath=="clip","important custom clip queues without replacing current playback");
-        Game.GameTime=1899;h.TickCustomSound();Check(System.Media.SoundPlayer.Plays==2,"queued custom clip waits full current reservation");
-        Game.GameTime=1900;h.TickCustomSound();h.PlayKissSound("clip");
-        Check(System.Media.SoundPlayer.Plays==3 && System.Media.SoundPlayer.Stops==0 && System.Media.SoundPlayer.Interruptions==0 && h._queuedCustomSoundPath==null,"important queued custom clip wins idle channel without preemption");
-        h.PlayBjCustom("clip",true);h.ResetPartnerAudio();Check(h._queuedCustomSoundPath==null,"reset cancels queued custom playback");
-        h=New();h.partnerVoice=HOOKER_VOICES[7];h.TickPartnerAudio();Check(h._pendingPartnerVoiceChange && h._voiceAwaitingReadback,"cfg-restored selection schedules engine application");
-        Game.GameTime=1001;h.TickPartnerAudio();Check(h._appliedPartnerVoice==HOOKER_VOICES[7] && !h._pendingPartnerVoiceChange,"cfg-restored selection confirms on next tick");
-        h=New();h.PlayPedSpeech(h.girl,"GENERIC_HI");Game.GameTime=6000;h.TickPartnerAudio();
-        Game.GameTime=6200;h.IsPartnerSpeechBusy(new Ped{Handle=99});Check(h._speechObservedPedHandle==42 && h._speechQuietStarted,"foreign ped query cannot reset primary quiet latch");
+        h.PlayPedSpeech(h.girl,"GENERIC_HI");h.PlaySlapSound("clip");
+        Game.GameTime=1180;h.PlaySlapSound("clip");h.PlayKissSound("clip");
+        Check(h._waveMixer.Clips.Count==3 && h._waveMixer.Stops==0,"slap and kiss wrappers launch during native speech without global stop");
+        Check(h._waveMixer.Clips[0].Until==1400 && h._waveMixer.Clips[1].Start==1180 && h._waveMixer.Clips[1].Until==1580,"400ms slap clips can overlap180ms cadence without shortening either");
+        Check(h.PlayBjCustom("clip"),"BJ wrapper ignores active slap/kiss/native channels");
+        Game.GameTime=1250;Check(!h.PlayBjCustom("clip",true) && h._queuedCustomSoundPath=="clip","important BJ clip queues behind own channel only");
+        h.TickCustomSound();Check(h._waveMixer.Clips.Count==4,"queued BJ waits own current clip");
+        Game.GameTime=1580;h.TickCustomSound();Check(h._waveMixer.Clips.Count==5 && h._queuedCustomSoundPath==null && h._waveMixer.Stops==0,"queued BJ starts after its full own-channel duration without stopping other effects");
+        h=New();h._bjWavData["clip"]=new byte[16];h._soundDurations["clip"]=400;
+        h.PlaySlapSound("clip");h.PlayBjCustom("clip");h.PlayPedSpeech(h.girl,"GENERIC_HI");
+        Check(Function.StartTimes.Count==1,"native request starts while independent WAV outputs are already playing");
+        h=New();h._bjWavData["clip"]=new byte[16];h.currentAction="sex";h.animSpeed=1.5f;h.girl.SpeakingUntil=20000;
+        for(int t=1000;t<=10000;t+=10) { Game.GameTime=t;h.TickEffects(); }
+        int slowSlaps=h._waveMixer.Clips.Count;
+        h=New();h._bjWavData["clip"]=new byte[16];h.currentAction="sex";h.animSpeed=3f;h.girl.SpeakingUntil=20000;
+        for(int t=1000;t<=10000;t+=10) { Game.GameTime=t;h.TickEffects(); }
+        Check(h._waveMixer.Clips.Count>slowSlaps,"actual slap producer starts more full clips at speed3 than1.5");
+        Check(h._waveMixer.Clips.TrueForAll(c=>c.Rate==1f && c.Until-c.Start==400),"tempo controls effect start cadence while wrapper keeps full clip at original rate");
 
         h=New(); h.ToggleLiveVoiceMenu();
         Check(h._liveVoiceMenu && h.menuLevel==MenuLevel.PartnerVoices,"live overlay opens during loop");
@@ -308,27 +348,16 @@ tests = r'''
         h=New(); h.QueuePartnerSpeech(h.girl,"SEX_FINISHED"); h.girl.Valid=false; h.TickPartnerAudio();
         Check(h._queuedSpeechName==null && !h._pendingPartnerVoiceChange,"lost partner cancels scheduled audio");
         Check(Function.Stops==0,"scheduler never stops ambient speech");
-        h=New(); Function.Delay=400; h.PlayPedSpeech(h.girl,"GENERIC_HI");
-        Game.GameTime=1350; h.PlayPedSpeech(h.girl,"SEX_GENERIC");
-        Check(Function.Spoken.Count==1,"native startup delayed beyond300ms does not trigger second line");
-        h=New(); h.PlayPedSpeech(h.girl,"GENERIC_HI"); initialSets=Function.VoiceSets;
-        Function.FalseFrom=4000; Function.FalseUntil=4300;
-        for(int t=3500;t<=4400;t+=50) {
-            Game.GameTime=t;
-            if(t==4100) h.SelectPartnerVoice(HOOKER_VOICES[7]);
-            h.TickPeriodic(); h.TickPartnerAudio();
-        }
-        Check(Function.Spoken.Count==1 && Function.Stops==0,"transient300ms false speech flag cannot truncate or restart current line");
-        Check(h._pendingPartnerVoiceChange && Function.VoiceSets==initialSets,"transient native false gap cannot change bank midline");
-        Console.WriteLine("PASS: "+count+" deterministic audio/menu assertions. GTA natives mocked; no in-game audio validation.");
+        Console.WriteLine("Native scheduler/menu: "+(count-failures)+" passed, "+failures+" failed. Launch requests are distinct from simulated playback; GTA not run.");
+        if(failures>0)Environment.Exit(1);
     }
 }
 '''
 with tempfile.TemporaryDirectory(prefix='cinnamon-audio-tests-') as directory:
     temp=Path(directory); cs=temp/'AudioTests.cs'; dll=temp/'AudioTests.dll'
-    cs.write_text(mocks+voices+selector+methods+periodic+finish_gate+tests)
+    cs.write_text(mocks+voices+selector+methods+periodic+effects+'\n'.join(re.findall(r'private const int KISS_SOUND_\w+\s*=\s*\d+;',source))+finish_gate+tests)
     rsp=temp/'refs.rsp'; rsp.write_text('\n'.join('/r:'+str(p) for p in refs.glob('*.dll')))
-    subprocess.run([str(dotnet),str(sdk),'/nologo','/nowarn:0649,0414','/target:exe','/langversion:5','/nostdlib+','@'+str(rsp),'/out:'+str(dll),str(cs)],check=True)
+    subprocess.run([str(dotnet),str(sdk),'/nologo','/nowarn:0649,0414,0169','/target:exe','/langversion:5','/nostdlib+','@'+str(rsp),'/out:'+str(dll),str(cs)],check=True)
     (temp/'AudioTests.runtimeconfig.json').write_text(json.dumps({'runtimeOptions':{'tfm':'net8.0','framework':{'name':'Microsoft.NETCore.App','version':runtime}}}))
     subprocess.run([str(dotnet),str(dll)],cwd=temp,check=True)
 print('PASS: '+str(len(wiring))+' input/reset/audio wiring checks.')
