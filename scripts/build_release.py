@@ -4,12 +4,14 @@ from pathlib import Path
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-PACKAGE = ROOT / 'releases/CinnamonCoffee-voice-fix-1.2.zip'
+PACKAGE = ROOT / 'releases/CinnamonCoffee-club-dance-1.3.zip'
 LATEST = ROOT / 'releases/CinnamonCoffee-live-voices.zip'
 
 
 def main():
-    sources = sorted(p for p in (ROOT / 'Mod/scripts').rglob('*') if p.is_file())
+    # Publish program/assets, never a local A-Life save or the new club tip ledger.
+    sources = [ROOT / 'Mod/scripts/CinnamonCoffee.3.cs', ROOT / 'Mod/scripts/CinnamonCoffee.cfg']
+    sources += sorted((ROOT / 'Mod/scripts/CinnamonCoffeeSounds').glob('*.wav'))
     assert len(list((ROOT / 'Mod/scripts/CinnamonCoffeeSounds').glob('*.wav'))) == 31
     assert (ROOT / 'Mod/scripts/CinnamonCoffee.3.cs') in sources
     assert not (ROOT / 'Mod/scripts/CinnamonCoffee.cs').exists(), 'Do not package duplicate scripts'

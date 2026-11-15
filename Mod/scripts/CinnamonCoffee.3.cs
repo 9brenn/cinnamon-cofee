@@ -38,7 +38,7 @@ namespace CinnamonCoffee
         private enum ScriptState { Idle, Approaching, Animating }
         private enum Mode { None, Car, Street }
         private enum VehicleAnimType { Normal, Low }
-        private enum MenuLevel { None, Main, SandboxCar, Services, StandingServices, SittingServices, LayingServices, SitDownSub, Compatibility, Settings, PartnerVoices, Approach, ApproachLine, Finish, Actions, Leave, LeaveLine, Conversation, ConvSub, Intimacy, IntimacySub, Escalate, InviteToVehicle, GiveMoney }
+        private enum MenuLevel { None, Main, SandboxCar, Services, StandingServices, SittingServices, LayingServices, SitDownSub, Compatibility, Settings, PartnerVoices, Approach, ApproachLine, Finish, Actions, Leave, LeaveLine, Conversation, ConvSub, Intimacy, IntimacySub, Escalate, InviteToVehicle, GiveMoney, Club }
         private enum PriceGroup { Kissing, Blowjob, Facesitting, Cowgirl, Doggy }
 
         // ================================================================
@@ -5447,6 +5447,321 @@ namespace CinnamonCoffee
             return "\"...\"";
         }
 
+        // VANILLA UNICORN DANCE MODULE
+        private enum ClubDancePhase { Off, Loading, Performing }
+        private static readonly Vector3 CLUB_INTERIOR_PROBE = new Vector3(114.64f, -1290.34f, 29.68f);
+        // Scene origins, not ped coordinates. Derived from the game's stripclub script.
+        private static readonly Vector3[] CLUB_POLES = {
+            new Vector3(112.86f, -1286.91f, 28.46f),
+            new Vector3(104.44f, -1294.14f, 29.258f),
+            new Vector3(102.50f, -1290.78f, 29.258f)
+        };
+        private ClubDancePhase _clubPhase = ClubDancePhase.Off;
+        private Ped _clubPerformer = null;
+        private int _clubPerformerHandle = 0;
+        private Vector3 _clubOriginalPosition;
+        private float _clubOriginalHeading;
+        private bool _clubOriginalFrozen, _clubOriginalPersistent, _clubPlaced, _clubPlayerJob;
+        private int _clubDanceVariant = 1, _clubPole = -1, _clubScene = -1;
+        private int _clubLoadDeadline, _clubStartedAt, _clubNextTipAt, _clubEarned;
+        private int _clubCareerTips;
+        private bool _clubHotkeyWasDown, _clubMasterWasDown, _clubMasterConsumed;
+        private string ClubDictionary { get { return "mini@strip_club@pole_dance@pole_dance" + _clubDanceVariant; } }
+        private string ClubClip { get { return "pd_dance_0" + _clubDanceVariant; } }
+
+        private bool IsInsideVanillaUnicorn(Ped ped)
+        {
+            if (ped == null || !ped.Exists() || !ped.IsAlive || ped.IsInVehicle()) return false;
+            if (ped.Position.DistanceTo(CLUB_INTERIOR_PROBE) > 55f) return false;
+            int interior = Function.Call<int>(Hash.GET_INTERIOR_AT_COORDS,
+                CLUB_INTERIOR_PROBE.X, CLUB_INTERIOR_PROBE.Y, CLUB_INTERIOR_PROBE.Z);
+            return interior != 0 && Function.Call<bool>(Hash.IS_INTERIOR_READY, interior)
+                && Function.Call<int>(Hash.GET_INTERIOR_FROM_ENTITY, ped) == interior;
+        }
+
+        private bool IsClubIdleSafe()
+        {
+            return state == ScriptState.Idle && !carPropActive && !_streetSitPropActive
+                && !_finishExecutePending && _postSexPhase == 0 && !tokenKeyboardOpen;
+        }
+
+        private bool IsClubPoleFree(int index, Ped performer)
+        {
+            Vector3 pole = CLUB_POLES[index];
+            foreach (Ped ped in World.GetNearbyPeds(pole, 2.5f))
+            {
+                if (ped == null || !ped.Exists() || !ped.IsAlive || ped.Handle == performer.Handle) continue;
+                Vector3 d = ped.Position - pole;
+                if (d.X * d.X + d.Y * d.Y < 1.6f * 1.6f && Math.Abs(d.Z) < 1.8f) return false;
+            }
+            return true;
+        }
+
+        private void OpenClubMenu()
+        {
+            if (!IsInsideVanillaUnicorn(Game.Player.Character))
+            { ShowHudStatus("~y~ENTER VANILLA UNICORN FIRST", 3000); return; }
+            if (!IsClubIdleSafe())
+            { ShowHudStatus("~y~FINISH THE CURRENT INTERACTION FIRST", 3000); return; }
+            LoadClubTipRecord();
+            menuLevel = MenuLevel.Club;
+            menuIndex = 0;
+            keyCooldown = KEY_COOLDOWN_FRAMES;
+        }
+
+        private void StartClubDance(bool playerJob)
+        {
+            Ped player = Game.Player.Character;
+            if (_clubPhase != ClubDancePhase.Off)
+            { ShowHudStatus("~y~END THE CURRENT SHOW FIRST", 3000); return; }
+            if (!IsClubIdleSafe() || !IsInsideVanillaUnicorn(player))
+            { ShowHudStatus("~y~ENTER THE CLUB AND FINISH THE CURRENT INTERACTION", 3000); return; }
+            if (playerJob && player.Model.Hash != Function.Call<int>(Hash.GET_HASH_KEY, "mp_f_freemode_01"))
+            { ShowHudStatus("~y~THIS DANCE JOB REQUIRES MP FEMALE", 3000); return; }
+            Ped performer = playerJob ? player : girl;
+            if ((!playerJob && !hasGirl) || performer == null || !performer.Exists() || !performer.IsHuman || Function.Call<bool>(Hash.IS_PED_MALE, performer)
+                || !IsInsideVanillaUnicorn(performer))
+            { ShowHudStatus("~y~BRING YOUR PARTNER INSIDE THE CLUB", 3000); return; }
+            int pole = -1;
+            for (int i = 0; i < CLUB_POLES.Length; i++)
+                if (IsClubPoleFree(i, performer)) { pole = i; break; }
+            if (pole < 0)
+            { ShowHudStatus("~y~ALL STAGE POLES ARE OCCUPIED", 3000); return; }
+            // Capture before changing any flags/tasks. Only a confirmed Start command reaches here.
+            _clubPerformer = performer;
+            _clubPerformerHandle = performer.Handle;
+            _clubOriginalPosition = performer.Position;
+            _clubOriginalHeading = performer.Heading;
+            _clubOriginalFrozen = performer.IsPositionFrozen;
+            _clubOriginalPersistent = performer.IsPersistent;
+            _clubPlayerJob = playerJob;
+            _clubPlaced = false;
+            _clubPole = pole;
+            _clubEarned = 0;
+            _clubScene = -1;
+            _clubLoadDeadline = Game.GameTime + 5000;
+            _clubPhase = ClubDancePhase.Loading;
+            Function.Call(Hash.REQUEST_ANIM_DICT, ClubDictionary);
+            menuLevel = MenuLevel.Club;
+            menuIndex = 3; // End show remains immediately reachable.
+        }
+
+        private void StopClubDance(bool returnToStart)
+        {
+            if (_clubPhase == ClubDancePhase.Off && _clubPerformer == null) return;
+            Ped performer = _clubPerformer;
+            bool captured = _clubPhase != ClubDancePhase.Off && performer != null
+                && performer.Exists() && performer.Handle == _clubPerformerHandle;
+            try
+            {
+                if (captured)
+                {
+                    try
+                    {
+                        if (Function.Call<bool>(Hash.IS_ENTITY_PLAYING_ANIM, performer, ClubDictionary, ClubClip, 3))
+                            Function.Call(Hash.STOP_ANIM_TASK, performer, ClubDictionary, ClubClip, -4f);
+                    }
+                    catch { } // The actor may lose its animation/scene during an external interruption.
+                    if (_clubPlaced && returnToStart && performer.IsAlive && IsInsideVanillaUnicorn(Game.Player.Character))
+                    {
+                        Function.Call(Hash.SET_ENTITY_COORDS_NO_OFFSET, performer,
+                            _clubOriginalPosition.X, _clubOriginalPosition.Y, _clubOriginalPosition.Z, false, false, false);
+                        performer.Heading = _clubOriginalHeading;
+                    }
+                    performer.IsPositionFrozen = _clubOriginalFrozen;
+                    performer.SetIsPersistentNoClearTask(_clubOriginalPersistent);
+                }
+                if (_clubScene >= 0)
+                {
+                    Function.Call(Hash.SET_SYNCHRONIZED_SCENE_LOOPED, _clubScene, false);
+                    Function.Call(Hash.SET_SYNCHRONIZED_SCENE_PHASE, _clubScene, 1f);
+                }
+            }
+            finally
+            {
+                _clubPhase = ClubDancePhase.Off;
+                _clubPerformer = null;
+                _clubPerformerHandle = 0;
+                _clubScene = -1;
+                _clubPole = -1;
+                _clubPlaced = false;
+                _clubPlayerJob = false;
+                _clubMasterConsumed = true;
+                _suppressFinishUntilMasterReleased = true;
+                keyCooldown = KEY_COOLDOWN_FRAMES;
+            }
+        }
+
+        private void TickClubDance()
+        {
+            if (_clubPhase == ClubDancePhase.Off) return;
+            Ped performer = _clubPerformer;
+            Ped player = Game.Player.Character;
+            if (performer == null || !performer.Exists() || performer.Handle != _clubPerformerHandle
+                || !performer.IsAlive || !IsInsideVanillaUnicorn(player)
+                || (!(_clubPlayerJob) && (!hasGirl || girl == null || !girl.Exists() || girl.Handle != _clubPerformerHandle))
+                || (_clubPlayerJob && player.Handle != _clubPerformerHandle))
+            { StopClubDance(false); return; }
+            if (_clubPhase == ClubDancePhase.Loading)
+            {
+                if (Game.GameTime >= _clubLoadDeadline)
+                { StopClubDance(false); ShowHudStatus("~y~DANCE ANIMATION DID NOT LOAD", 3000); return; }
+                if (!Function.Call<bool>(Hash.HAS_ANIM_DICT_LOADED, ClubDictionary)) return;
+                if (!IsClubPoleFree(_clubPole, performer))
+                { StopClubDance(false); ShowHudStatus("~y~THIS POLE IS NOW OCCUPIED", 3000); return; }
+                Vector3 origin = CLUB_POLES[_clubPole];
+                Vector3 initial = Function.Call<Vector3>(Hash.GET_ANIM_INITIAL_OFFSET_POSITION,
+                    ClubDictionary, ClubClip, origin.X, origin.Y, origin.Z, 0f, 0f, 300f, 0f, 2);
+                if (float.IsNaN(initial.X) || float.IsNaN(initial.Y) || float.IsNaN(initial.Z)
+                    || initial.DistanceTo(origin) > 4f)
+                { StopClubDance(false); ShowHudStatus("~y~INVALID STAGE ANIMATION POSITION", 3000); return; }
+                performer.SetIsPersistentNoClearTask(true);
+                performer.IsPositionFrozen = false;
+                _clubPlaced = true;
+                // Explicit stage-placement command; no walking/teleport fallback is hidden in a timeout.
+                Function.Call(Hash.SET_ENTITY_COORDS_NO_OFFSET, performer, initial.X, initial.Y, initial.Z, false, false, false);
+                performer.Heading = 300f;
+                _clubScene = Function.Call<int>(Hash.CREATE_SYNCHRONIZED_SCENE, origin.X, origin.Y, origin.Z, 0f, 0f, 300f, 2);
+                if (_clubScene < 0) { StopClubDance(true); return; }
+                Function.Call(Hash.SET_SYNCHRONIZED_SCENE_LOOPED, _clubScene, true);
+                Function.Call(Hash.TASK_SYNCHRONIZED_SCENE, performer, _clubScene, ClubDictionary, ClubClip, 4f, -4f, 1, 0, 1000f, 0);
+                _clubStartedAt = Game.GameTime;
+                _clubNextTipAt = Game.GameTime + 30000;
+                _clubPhase = ClubDancePhase.Performing;
+                return;
+            }
+            bool dancing = Function.Call<bool>(Hash.IS_ENTITY_PLAYING_ANIM, performer, ClubDictionary, ClubClip, 3);
+            if (!dancing && Game.GameTime - _clubStartedAt > 1000)
+            { StopClubDance(false); ShowHudStatus("~y~SHOW ENDED", 2000); return; }
+            if (!_clubPlayerJob || !dancing || Game.GameTime < _clubNextTipAt) return;
+            _clubNextTipAt = Game.GameTime + 30000; // No catch-up payout after skipped frames.
+            bool audience = false;
+            foreach (Ped spectator in World.GetNearbyPeds(performer.Position, 10f))
+                if (spectator != null && spectator.Exists() && spectator.IsAlive && spectator.IsHuman
+                    && Function.Call<bool>(Hash.IS_PED_MALE, spectator) && !spectator.IsPlayer
+                    && IsInsideVanillaUnicorn(spectator)) { audience = true; break; }
+            if (audience)
+            {
+                int tip = rng.Next(10, 51);
+                CreditClubTip(tip);
+                ShowHudStatus("~g~DANCE TIP: $" + tip + " | SHIFT: $" + _clubEarned, 3000);
+            }
+        }
+
+        private void LoadClubTipRecord()
+        {
+            try
+            {
+                ScriptSettings ledger = ScriptSettings.Load("scripts\\CinnamonCoffeeClub.ini");
+                _clubCareerTips = Math.Max(0, ledger.GetValue<int>("DanceJob", "TotalTips", 0));
+            }
+            catch { _clubCareerTips = 0; }
+        }
+
+        private void CreditClubTip(int tip)
+        {
+            _clubEarned = Math.Min(int.MaxValue - tip, _clubEarned) + tip;
+            // SHVDN Player.Money only supports the three story protagonists, not MP Female.
+            // Keep an honest, persistent dance-job record instead of silently losing payments.
+            try
+            {
+                ScriptSettings ledger = ScriptSettings.Load("scripts\\CinnamonCoffeeClub.ini");
+                int previous = Math.Max(0, ledger.GetValue<int>("DanceJob", "TotalTips", 0));
+                _clubCareerTips = Math.Min(int.MaxValue - tip, previous) + tip;
+                ledger.SetValue("DanceJob", "TotalTips", _clubCareerTips);
+                ledger.Save();
+            }
+            catch { ShowHudStatus("~y~TIP RECORD COULD NOT BE SAVED", 2500); }
+        }
+
+        private void HandleClubSelect()
+        {
+            if (menuIndex == 0) StartClubDance(false);
+            else if (menuIndex == 1) StartClubDance(true);
+            else if (menuIndex == 2)
+            {
+                if (_clubPhase == ClubDancePhase.Off) _clubDanceVariant = _clubDanceVariant % 3 + 1;
+                else ShowHudStatus("~y~END THE SHOW BEFORE CHANGING DANCE", 2500);
+            }
+            else if (menuIndex == 3) StopClubDance(true);
+            else
+            {
+                menuLevel = MenuLevel.None;
+                keyCooldown = KEY_COOLDOWN_FRAMES;
+            }
+        }
+
+        private void DrawClubMenu(float x, ref float y, float lh)
+        {
+            DrawSectionHeader("VANILLA UNICORN - DANCE", x, ref y);
+            DrawMenuItem("Partner: perform on free stage pole", 0, x, ref y, lh, 0.25f);
+            DrawMenuItem("MP Female: start dance shift", 1, x, ref y, lh, 0.27f);
+            DrawMenuItem("Dance variant: " + _clubDanceVariant, 2, x, ref y, lh);
+            DrawMenuItem("End show / return from stage", 3, x, ref y, lh, 0.27f);
+            DrawMenuItem("Close menu", 4, x, ref y, lh);
+            DrawMenuText("Shift tips: $" + _clubEarned + " | Recorded tips: $" + _clubCareerTips,
+                x + 0.007f, y, 0.202f, 0.23f, false, 200, 220, 200, 255);
+            y += lh;
+        }
+
+        private bool HandleClubFrame()
+        {
+            if (_usingController && (_clubPhase != ClubDancePhase.Off || menuLevel == MenuLevel.Club || _clubMasterConsumed))
+            {
+                Function.Call(Hash.DISABLE_ALL_CONTROL_ACTIONS, 0);
+                Function.Call(Hash.ENABLE_CONTROL_ACTION, 0, 1, true);
+                Function.Call(Hash.ENABLE_CONTROL_ACTION, 0, 2, true);
+                if (!_clubPlayerJob)
+                {
+                    Function.Call(Hash.ENABLE_CONTROL_ACTION, 0, 30, true);
+                    Function.Call(Hash.ENABLE_CONTROL_ACTION, 0, 31, true);
+                }
+            }
+            bool hotkey = !_usingController && Game.IsKeyPressed(Keys.F7);
+            bool toggle = hotkey && !_clubHotkeyWasDown;
+            _clubHotkeyWasDown = hotkey;
+            bool master = _usingController
+                ? Function.Call<bool>(Hash.IS_DISABLED_CONTROL_PRESSED, 0, masterControlModifier)
+                    && Function.Call<bool>(Hash.IS_DISABLED_CONTROL_PRESSED, 0, masterControl)
+                : Game.IsKeyPressed(masterKey);
+            if (!master) { _clubMasterWasDown = false; _clubMasterConsumed = false; }
+            bool ownedAtEntry = _clubPhase != ClubDancePhase.Off || menuLevel == MenuLevel.Club
+                || (_clubMasterConsumed && master);
+            if (toggle)
+            {
+                if (menuLevel == MenuLevel.Club) menuLevel = MenuLevel.None;
+                else OpenClubMenu();
+            }
+            bool ownsFrame = ownedAtEntry || _clubPhase != ClubDancePhase.Off || menuLevel == MenuLevel.Club;
+            if (!ownsFrame) return false;
+            Ped player = Game.Player.Character;
+            TickClubDance();
+            if (!IsInsideVanillaUnicorn(player))
+            {
+                StopClubDance(false);
+                if (menuLevel == MenuLevel.Club) menuLevel = MenuLevel.None;
+                return true;
+            }
+            if (master && !_clubMasterWasDown && keyCooldown == 0)
+            {
+                _clubMasterConsumed = true;
+                if (_clubPhase != ClubDancePhase.Off) StopClubDance(true);
+                menuLevel = menuLevel == MenuLevel.Club ? MenuLevel.None : MenuLevel.Club;
+                keyCooldown = KEY_COOLDOWN_FRAMES;
+            }
+            _clubMasterWasDown = master;
+            if (_usingController && menuLevel == MenuLevel.Club) HandleControllerMenuInput();
+            if (menuLevel == MenuLevel.Club) DrawMenu();
+            if (_clubPhase != ClubDancePhase.Off)
+                DrawTextOnScreen("[F7] CLUB MENU  [" + MasterDisplay + "] END SHOW  | TIPS: $" + _clubEarned,
+                    0.5f, 0.925f, 0.30f, true);
+            if (_hudStatusText != null && Game.GameTime < _hudStatusExpireAt)
+                DrawTextOnScreen(_hudStatusText, 0.5f, 0.865f, 0.30f, true);
+            return true;
+        }
+        // END VANILLA UNICORN DANCE MODULE
+
+
         // PARTNER VOICE SELECTION
         private sealed class PartnerVoiceEntry
         {
@@ -5564,7 +5879,7 @@ namespace CinnamonCoffee
             }
         }
         // PARTNER AUDIO SCHEDULER
-        private const string SCRIPT_VERSION = "1.2";
+        private const string SCRIPT_VERSION = "1.3";
         private const string VOICE_FIX_VERSION = SCRIPT_VERSION;
         private const int SPEECH_LAUNCH_GRACE_MS = 1200;
         private const int SPEECH_END_QUIET_MS = 450;
@@ -6690,6 +7005,9 @@ namespace CinnamonCoffee
         {
             if (tokenKeyboardOpen) return;
             if (_usingController) return;  // keyboard ignored when gamepad is active
+            if (menuLevel == MenuLevel.Club && e.KeyCode == menuBackKey)
+            { menuLevel = MenuLevel.None; keyCooldown = KEY_COOLDOWN_FRAMES; return; }
+            if ((_clubPhase != ClubDancePhase.Off || menuLevel == MenuLevel.Club) && e.KeyCode == masterKey) return;
             if (_liveVoiceMenu && (e.KeyCode == menuBackKey || e.KeyCode == masterKey))
             { CloseLiveVoiceMenu(); return; }
             // Animation master input is handled once in the tick; OS key-repeat must not
@@ -6952,6 +7270,11 @@ namespace CinnamonCoffee
         {
             if (tokenKeyboardOpen) return;
             if (_menuControlCooldown > 0) return;
+            if (menuLevel == MenuLevel.Club && Function.Call<bool>(Hash.IS_DISABLED_CONTROL_JUST_PRESSED, 0, menuBackControl))
+            { menuLevel = MenuLevel.None; _menuControlCooldown = KEY_COOLDOWN_FRAMES; return; }
+            if ((_clubPhase != ClubDancePhase.Off || menuLevel == MenuLevel.Club)
+                && Function.Call<bool>(Hash.IS_DISABLED_CONTROL_PRESSED, 0, masterControlModifier)
+                && Function.Call<bool>(Hash.IS_DISABLED_CONTROL_JUST_PRESSED, 0, masterControl)) return;
             if (_liveVoiceMenu && (Function.Call<bool>(Hash.IS_DISABLED_CONTROL_JUST_PRESSED, 0, menuBackControl)
                 || (Function.Call<bool>(Hash.IS_DISABLED_CONTROL_PRESSED, 0, masterControlModifier)
                     && Function.Call<bool>(Hash.IS_DISABLED_CONTROL_JUST_PRESSED, 0, masterControl))))
@@ -7265,11 +7588,12 @@ namespace CinnamonCoffee
 
         private int GetCurrentMenuItemCount()
         {
+            if (menuLevel == MenuLevel.Club) return 5;
             if (menuLevel == MenuLevel.Main)
             {
                 // hasGirl: Actions/Services, Leave/Dismiss, Teleport, AI Mode, Game Mode, Settings>, Sinkra, Token, Bridge (9)
                 // no girl: Search, AI Mode, Game Mode, Settings>, Sinkra, Token, Bridge (7)
-                return hasGirl ? 10 : 8;
+                return hasGirl ? 11 : 9;
             }
             else if (menuLevel == MenuLevel.SandboxCar)
             {
@@ -7405,6 +7729,8 @@ namespace CinnamonCoffee
         /// <summary>Handle menu item selection for current level.</summary>
         private void HandleMenuSelect()
         {
+            if (menuLevel == MenuLevel.Club) { HandleClubSelect(); return; }
+            if (menuLevel == MenuLevel.Main && menuIndex == (hasGirl ? 10 : 8)) { OpenClubMenu(); return; }
             if (menuLevel == MenuLevel.Main)
             {
                 // Build menu item mapping based on hasGirl
@@ -9963,6 +10289,8 @@ namespace CinnamonCoffee
 
             if (keyCooldown > 0) keyCooldown--;
             if (_menuControlCooldown > 0) _menuControlCooldown--;
+            _usingController = Game.LastInputMethod == InputMethod.GamePad;
+            if (HandleClubFrame()) return; // Club ownership isolates dance/menu from the core follow/approach AI.
 
             // ── Offline simulation: tick every 30 s for peds outside render range ─────
             if (aLifeMode && Game.GameTime >= _offlineSimAt)
@@ -17964,6 +18292,7 @@ namespace CinnamonCoffee
 
         private void FullReset(bool keepGirlTask = false)
         {
+            StopClubDance(false);
             _telemetry.SendStop();
             DetachDildoProp();
             RemoveGirlBlip();
@@ -18111,7 +18440,7 @@ namespace CinnamonCoffee
 
             // ── Header title "CINNAMON COFFEE" — vertically centered in the header bar ──
             float hdrTextY = TOP + (HDR_H * 0.5f) - 0.014f;
-            DrawMenuText("CINNAMON COFFEE 1.2", PX + PAD, hdrTextY, W - PAD * 2f, 0.38f, true, 210, 125, 45, 255, 7);
+            DrawMenuText("CINNAMON COFFEE 1.3", PX + PAD, hdrTextY, W - PAD * 2f, 0.38f, true, 210, 125, 45, 255, 7);
 
             // ── Pass 3: redraw items on top of background ────────────────────────
             float y = TOP + HDR_H + 0.016f;
@@ -18131,7 +18460,8 @@ namespace CinnamonCoffee
 
         private void DispatchDrawMenu(float x, ref float y, float lh)
         {
-            if      (menuLevel == MenuLevel.Main)               DrawMainMenu(x, ref y, lh);
+            if      (menuLevel == MenuLevel.Club)               DrawClubMenu(x, ref y, lh);
+            else if (menuLevel == MenuLevel.Main)               DrawMainMenu(x, ref y, lh);
             else if (menuLevel == MenuLevel.SandboxCar)         DrawSandboxCarMenu(x, ref y, lh);
             else if (menuLevel == MenuLevel.Services)           DrawServicesMenu(x, ref y, lh);
             else if (menuLevel == MenuLevel.SitDownSub)         DrawSitDownSubMenu(x, ref y, lh);
@@ -19010,6 +19340,7 @@ namespace CinnamonCoffee
                 : _telemetry.IsDeviceOnline ? "~g~CONNECTED!"
                 : "~r~NOT CONNECTED!";
             DrawMenuItem("Device Status: " + bridgeStatus, idx, x, ref y, lh); idx++;
+            DrawMenuItem("Vanilla Unicorn ~b~[>]~s~", idx, x, ref y, lh); idx++;
         }
 
         private void DrawSettingsMenu(float x, ref float y, float lh)

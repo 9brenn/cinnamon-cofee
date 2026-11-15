@@ -141,7 +141,7 @@ tests=r'''
         foreach(bool girl in new[]{false,true}) foreach(bool life in new[]{false,true}) foreach(bool sandbox in new[]{false,true}) foreach(bool engine in new[]{false,true}) {
             h.hasGirl=girl;h.aLifeMode=life;h.sandboxMode=sandbox;h.carEngineEnabled=engine;
             h.menuLevel=MenuLevel.Main;
-            Check(h.GetCurrentMenuItemCount()==(girl?10:8),"main count across modes");
+            Check(h.GetCurrentMenuItemCount()==(girl?11:9),"main count across modes");
             int settingsIndex=girl?MAIN_GIRL_INDEX:MAIN_NO_GIRL_INDEX;
             h.menuIndex=settingsIndex; Function.Clear(); float y=0.1f; h.DrawMainMenu(0.025f,ref y,0.034f);
             var text=Function.Texts.Single(t=>t.Value.StartsWith("Settings"));

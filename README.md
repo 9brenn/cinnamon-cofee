@@ -1,4 +1,4 @@
-# CinnamonCoffee 1.2 — regularne dialogi i niezależne kanały WAV
+# CinnamonCoffee 1.3 — moduł taneczny Vanilla Unicorn
 
 Wersja przygotowana na podstawie przesłanego kodu CinnamonCoffee. Zawiera
 8 istniejących kobiecych głosów postaci `S_F_Y_HOOKER` z GTA V oraz 31 przesłanych
@@ -6,15 +6,48 @@ plików WAV. Nagrania pozostają niezmienione; nie dodano nowych głosów AI.
 
 ## Pobieranie
 
-Gotowa paczka instalacyjna: [CinnamonCoffee-voice-fix-1.2.zip](releases/CinnamonCoffee-voice-fix-1.2.zip).
+Gotowa paczka instalacyjna: [CinnamonCoffee-club-dance-1.3.zip](releases/CinnamonCoffee-club-dance-1.3.zip).
 Na stronie pliku ZIP wybierz **Download raw file**, aby pobrać archiwum.
 
-## Co poprawiono
+## Nowość 1.3: Vanilla Unicorn
+
+Dodano osobny moduł występów tanecznych, bez przebudowy dotychczasowych usług
+i odtwarzania audio. W lokalu naciśnij **F7** albo wybierz
+**J → Vanilla Unicorn**. Menu działa również z dotychczasową nawigacją pada.
+
+- **Partner: perform on free stage pole** — partnerka obecna w klubie rozpoczyna
+  występ na pierwszej wolnej rurze spośród trzech scenicznych stanowisk.
+- **MP Female: start dance shift** — graczka o modelu `mp_f_freemode_01` rozpoczyna
+  zmianę taneczną. Co 30 sekund może otrzymać napiwek $10–50, jeśli faktycznie
+  tańczy i w odległości do 10 metrów są żywi męscy widzowie w tym samym klubie.
+  Nie powstają nowi NPC, a obecnym widzom nie są zmieniane zadania.
+  Napiwki są ewidencjonowane w `CinnamonCoffeeClub.ini` i widoczne w menu jako
+  zarobek zmiany oraz łączny wynik. To osobny rejestr klubowy: API pieniędzy SHVDN
+  nie obsługuje postaci MP Female, więc moduł nie udaje dopłaty do portfela GTA.
+- **Dance variant** wybiera jeden z trzech istniejących tańców GTA V przed startem.
+- **End show / return from stage** kończy występ i przywraca pozycję sprzed
+  występu. **J** także kończy występ. **F7** zamyka lub otwiera samo menu.
+
+Start jawnie ustawia wybraną postać na wolnym stanowisku sceny, dopasowanym do
+sceny zsynchronizowanej animacji. Nie zmienia modelu ani ubrań. Zajęte rury
+blokują start; moduł nie usuwa i nie przesuwa tancerek gry. W danej chwili działa
+jeden występ: partnerki albo graczki. Zakres dodatku to taniec i napiwki;
+nie dodano nowych scen seksualnych ani obsługi seksualnej klientów.
+
+Podczas występu stare podążanie i automatyczne podejścia są wstrzymane, aby nie
+nadpisywały tańca. Zwykłe zatrzymanie przywraca wcześniejsze flagi postaci.
+Opuszczenie klubu, śmierć lub zniknięcie postaci kończy moduł bez przenoszenia
+postaci z powrotem do lokalu. Wyładowanie całego skryptu zachowuje dotychczasowe
+sprzątanie moda: odblokowuje gracza i zwalnia przejętą partnerkę.
+Animacje mają limit pięciu sekund na załadowanie. Jeśli gra przerwie taniec,
+moduł kończy występ zamiast bez końca przejmować zadania postaci.
+
+## Zachowane funkcje głosu i odtwarzania
 
 - Menu wyboru głosu można otworzyć podczas trwającej pętli animacji. Animacja
   kontynuuje działanie z dotychczasową szybkością.
 - **Partner Voice** ma bezpośrednią pozycję w menu głównym i pozostaje także
-  w **Settings**. Menu pokazuje osiem głosów i numer wersji **1.2**.
+  w **Settings**. Menu pokazuje osiem głosów i numer wersji **1.3**.
 - Zmiana głosu czeka na naturalny koniec bieżącej wypowiedzi. Kilka kolejnych
   wyborów zastępuje oczekujący wybór; obowiązuje ostatni.
 - Wybrany bank jest przekazywany bezpośrednio przy rozpoczynaniu każdej kwestii.
@@ -64,7 +97,7 @@ Na stronie pliku ZIP wybierz **Download raw file**, aby pobrać archiwum.
    `CinnamonCoffee.3.cs`. Zachowuje istniejącą konfigurację, A-Life i WAV-y.
    Kopie wewnątrz podfolderu `scripts` mogą nadal być uruchamiane przez SHVDN.
 4. Wymagane są ScriptHookV i ScriptHookVDotNet v3 zgodne z Twoją wersją GTA V.
-   Po uruchomieniu w nagłówku menu powinno być **CINNAMON COFFEE 1.2**.
+   Po uruchomieniu w nagłówku menu powinno być **CINNAMON COFFEE 1.3**.
    Jeżeli nadal widzisz stare podpowiedzi w jednym wierszu lub dwie nakładki,
    sprawdź, czy instalator wskazywał właściwy folder gry.
 
@@ -105,6 +138,7 @@ python3 tests/verify_partner_audio.py /ścieżka/do/dotnet
 python3 tests/verify_menu_rendering.py /ścieżka/do/dotnet
 python3 tests/verify_wave_engine.py /ścieżka/do/dotnet
 python3 tests/verify_finish_flow.py
+python3 tests/verify_club_dance.py /ścieżka/do/dotnet
 python3 tests/verify_installer.py /ścieżka/do/pwsh
 python3 scripts/build_release.py
 ```
@@ -117,8 +151,8 @@ Testy `waveOut` sprawdzają parser PCM, nakładanie pełnych klipów oraz czas �
 buforów i sprzątanie urządzeń za pomocą symulowanego sterownika.
 Instalator sprawdzono na tymczasowych katalogach w PowerShell 7.4.6;
 używa składni zgodnej z Windows PowerShell 5.1.
-Testy nie zastępują odsłuchu i sprawdzenia
-sterowania w GTA V. Środowisko użyte do prac nie zawiera gry. Sam silnik,
+Testy nie zastępują odsłuchu ani sprawdzenia animacji scenicznych i sterowania
+w GTA V. Środowisko użyte do prac nie zawiera gry. Sam silnik,
 usunięcie postaci, anulowanie interakcji lub inny mod mogą nadal przerwać mowę.
 Nie zmieniono zawartości ani formatu przesłanych nagrań. Nie uruchomiono tutaj
 rzeczywistego sterownika dźwięku Windows. Jeśli urządzenie odrzuci format audio
