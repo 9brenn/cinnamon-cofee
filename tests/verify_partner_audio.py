@@ -37,8 +37,8 @@ methods = '\n'.join(method(signature) for signature in (
     'private void PlayKissSound(string path)',
 ))
 voices = 'private static readonly string[] HOOKER_VOICES = {' + source.split('private static readonly string[] HOOKER_VOICES = {', 1)[1].split('};', 1)[0] + '};'
-finish_condition = source.split('if (masterTriggered && keyCooldown == 0 && !_liveVoiceMenu', 1)[1].split(')', 1)[0]
-finish_gate = 'private bool TestFinishGate(bool masterTriggered) { return masterTriggered && keyCooldown == 0 && !_liveVoiceMenu' + finish_condition + '; }'
+finish_condition = re.search(r'if \((masterTriggered[^\n]*!_liveVoiceMenu[^\n]*)\)',source).group(1)
+finish_gate = 'private bool TestFinishGate(bool masterTriggered) { return ' + finish_condition + '; }'
 periodic = 'private void TickPeriodic() {' + source.split('// Animation speed controls request cadence, never the duration of a speech line.', 1)[1].split('// Custom BJ sounds', 1)[0] + '}\n'
 effects = 'private void TickEffects() { int now=Game.GameTime; '+source.split('// Sex slap sounds —',1)[1].split('// Slow healing during loop phase',1)[0].split('bool _standingFinishInsideSlap',1)[1]+'}'
 effects=effects.replace(' { int now=Game.GameTime; ',' { int now=Game.GameTime; bool _standingFinishInsideSlap',1)
@@ -47,7 +47,7 @@ effects=effects.replace(' { int now=Game.GameTime; ',' { int now=Game.GameTime; 
 wiring = {
     'keyboard closes overlay before normal navigation': 'if (_liveVoiceMenu && (e.KeyCode == menuBackKey || e.KeyCode == masterKey))\n            { CloseLiveVoiceMenu(); return; }',
     'controller closes overlay': 'if (_liveVoiceMenu && (Function.Call<bool>(Hash.IS_DISABLED_CONTROL_JUST_PRESSED, 0, menuBackControl)',
-    'overlay suppresses finish trigger': 'if (masterTriggered && keyCooldown == 0 && !_liveVoiceMenu && !_suppressFinishUntilMasterReleased)',
+    'overlay suppresses finish trigger': 'if (masterTriggered && !_speechGapKeyboardOpen && !_speechGapInputFrame && keyCooldown == 0 && !_liveVoiceMenu && !_suppressFinishUntilMasterReleased)',
     'overlay suppresses animation speed buttons': 'speedCooldown == 0 && !_finishExecutePending && !_liveVoiceMenu',
     'periodic voice reapply observes speech': 'Game.GameTime >= _voiceReapplyAt && !IsPartnerSpeechBusy(girl) && !_pendingPartnerVoiceChange',
     'tick drives scheduler': 'TickPartnerAudio(); // Apply a requested voice only between complete speech lines.',
@@ -84,7 +84,8 @@ static class Game {
 enum Hash : ulong {
     GET_HASH_KEY = 1, SET_AMBIENT_VOICE_NAME, SET_AUDIO_FLAG,
     PLAY_PED_AMBIENT_SPEECH_NATIVE, IS_DISABLED_CONTROL_PRESSED,
-    IS_DISABLED_CONTROL_JUST_PRESSED, STOP_CURRENT_PLAYING_AMBIENT_SPEECH
+    IS_DISABLED_CONTROL_JUST_PRESSED, STOP_CURRENT_PLAYING_AMBIENT_SPEECH,
+    DISPLAY_ONSCREEN_KEYBOARD, UPDATE_ONSCREEN_KEYBOARD, GET_ONSCREEN_KEYBOARD_RESULT
 }
 static class Function {
     public static int Duration = 5000, Delay, VoiceSets, Stops, FalseFrom, FalseUntil, VoiceSetFailures;

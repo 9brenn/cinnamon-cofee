@@ -4,7 +4,7 @@ from pathlib import Path
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-PACKAGE = ROOT / 'releases/CinnamonCoffee-club-dance-1.3.zip'
+PACKAGE = ROOT / 'releases/CinnamonCoffee-voice-fix-1.4.zip'
 LATEST = ROOT / 'releases/CinnamonCoffee-live-voices.zip'
 
 

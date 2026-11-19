@@ -1,4 +1,4 @@
-# CinnamonCoffee 1.3 — moduł taneczny Vanilla Unicorn
+# CinnamonCoffee 1.4 — menu zakończenia i ustawiana przerwa dialogowa
 
 Wersja przygotowana na podstawie przesłanego kodu CinnamonCoffee. Zawiera
 8 istniejących kobiecych głosów postaci `S_F_Y_HOOKER` z GTA V oraz 31 przesłanych
@@ -6,8 +6,53 @@ plików WAV. Nagrania pozostają niezmienione; nie dodano nowych głosów AI.
 
 ## Pobieranie
 
-Gotowa paczka instalacyjna: [CinnamonCoffee-club-dance-1.3.zip](releases/CinnamonCoffee-club-dance-1.3.zip).
+Gotowa paczka instalacyjna: [CinnamonCoffee-voice-fix-1.4.zip](releases/CinnamonCoffee-voice-fix-1.4.zip).
 Na stronie pliku ZIP wybierz **Download raw file**, aby pobrać archiwum.
+
+## Zmiany w 1.4
+
+### J podczas animacji ulicznych
+
+Otwarcie menu **Finish** nie zatwierdza zakończenia. Wybór wymaga świeżego
+naciśnięcia po zwolnieniu przycisku; przytrzymany NUM5 nie może sam wybrać
+pierwszej pozycji. Na ulicy podczas pętli blokowane są działania rozgrywki,
+które mogą przerwać zadanie gracza. Kamera i pauza pozostają dostępne.
+
+Podczas otwartego menu skrypt pilnuje obu klipów. Jeśli jeden zostanie przerwany,
+przywraca tylko ten klip z jego własnej ostatniej poprawnej fazy. Zachowuje
+oddzielne czasy obu postaci, również przy różnych prędkościach. Nie restartuje
+sprawnej pary. Ochrona kończy się po wyborze zakończenia; nie działa dla martwych,
+zastąpionych ani oddalonych aktorów. Otwieranie menu i przywrócenia są zapisywane
+w `scripts/CinnamonCoffeeInput.log`, aby ułatwić diagnozę zachowania w grze.
+
+### Ustawiana przerwa między kwestiami
+
+Otwórz **J → Partner Voice** albo **F6** podczas animacji i wybierz
+**Speech gap** pod listą głosów. Wpisz liczbę sekund:
+
+- `0`: bez dodatkowego oczekiwania po wykryciu końca kwestii;
+- `1`, `2`, `3`, `10` itd.: stała przerwa;
+- `0.5` albo `0,5`: pół sekundy;
+- `-1` lub `random`: losowanie 2–5 sekund.
+
+Opcja **Use random 2-5 second gap** przywraca losowanie bez wpisywania tekstu.
+Wartość zapisuje się w `scripts/CinnamonCoffee.cfg`, np.:
+
+```ini
+partnerSpeechGapSeconds=0
+```
+
+Zmiana podczas odtwarzania nie przerywa bieżącej kwestii. Przy wpisywaniu
+animacje nadal są obsługiwane, a J i nawigacja nie sterują równocześnie menu.
+Anulowanie zachowuje poprzednią wartość. Obsługiwany zakres to 0–2147483 sekund
+lub `-1`. Długie odstępy uwzględniają przepełnienie zegara gry.
+
+**0 sekund oznacza brak dodatkowej pauzy, nie nakładanie dialogów.** Pozostaje
+ochrona uruchamiania i około 450 ms potwierdzania końca mowy; gra może dodać
+własną zwłokę. Przy dłuższej przerwie ten czas jest w niej uwzględniony.
+Instalator zachowuje istniejącą konfigurację; nowy klucz zostanie dopisany
+po zapisaniu ustawienia w menu. HazelnutCoffee i VanillaCoffee nie są integrowane
+w tym wydaniu — zakres ograniczono do dwóch uzgodnionych poprawek.
 
 ## Nowość 1.3: Vanilla Unicorn
 
@@ -47,7 +92,7 @@ moduł kończy występ zamiast bez końca przejmować zadania postaci.
 - Menu wyboru głosu można otworzyć podczas trwającej pętli animacji. Animacja
   kontynuuje działanie z dotychczasową szybkością.
 - **Partner Voice** ma bezpośrednią pozycję w menu głównym i pozostaje także
-  w **Settings**. Menu pokazuje osiem głosów i numer wersji **1.3**.
+  w **Settings**. Menu pokazuje osiem głosów i numer wersji **1.4**.
 - Zmiana głosu czeka na naturalny koniec bieżącej wypowiedzi. Kilka kolejnych
   wyborów zastępuje oczekujący wybór; obowiązuje ostatni.
 - Wybrany bank jest przekazywany bezpośrednio przy rozpoczynaniu każdej kwestii.
@@ -55,8 +100,8 @@ moduł kończy występ zamiast bez końca przejmować zadania postaci.
   próby i brak blokowania dialogów, nawet gdy silnik nie potwierdzi zmiany.
 - Nowa kwestia nie zatrzymuje poprzedniej przy wyższym tempie. Skrypt sprawdza
   rzeczywiste odtwarzanie mowy, ochronę uruchamiania i 450 ms ciągłej ciszy.
-  Następna kwestia otrzymuje jedną losową przerwę **2–5 sekund**, liczoną od końca
-  poprzedniej. Prędkość animacji nie skraca nagrania. Wywołania nie używają FORCE.
+  Następna kwestia otrzymuje ustawioną przerwę, domyślnie losową **2–5 sekund**,
+  liczoną od końca poprzedniej. Prędkość animacji nie skraca nagrania. Wywołania nie używają FORCE.
 - Skrypt odróżnia żądanie mowy od potwierdzonego rozpoczęcia. Odrzucone żądanie
   dostaje krótką próbę ponowienia; nie jest uznawane za ukończoną wypowiedź.
   Przywrócono flagę audio Director Mode na czas interakcji, aby unikać dodatkowych
@@ -97,7 +142,7 @@ moduł kończy występ zamiast bez końca przejmować zadania postaci.
    `CinnamonCoffee.3.cs`. Zachowuje istniejącą konfigurację, A-Life i WAV-y.
    Kopie wewnątrz podfolderu `scripts` mogą nadal być uruchamiane przez SHVDN.
 4. Wymagane są ScriptHookV i ScriptHookVDotNet v3 zgodne z Twoją wersją GTA V.
-   Po uruchomieniu w nagłówku menu powinno być **CINNAMON COFFEE 1.3**.
+   Po uruchomieniu w nagłówku menu powinno być **CINNAMON COFFEE 1.4**.
    Jeżeli nadal widzisz stare podpowiedzi w jednym wierszu lub dwie nakładki,
    sprawdź, czy instalator wskazywał właściwy folder gry.
 
@@ -138,6 +183,8 @@ python3 tests/verify_partner_audio.py /ścieżka/do/dotnet
 python3 tests/verify_menu_rendering.py /ścieżka/do/dotnet
 python3 tests/verify_wave_engine.py /ścieżka/do/dotnet
 python3 tests/verify_finish_flow.py
+python3 tests/verify_street_finish_guard.py Mod/scripts/CinnamonCoffee.3.cs /ścieżka/do/dotnet
+python3 tests/verify_speech_gap.py /ścieżka/do/dotnet
 python3 tests/verify_club_dance.py /ścieżka/do/dotnet
 python3 tests/verify_installer.py /ścieżka/do/pwsh
 python3 scripts/build_release.py

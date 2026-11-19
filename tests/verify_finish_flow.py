@@ -7,6 +7,7 @@ ownership and transition timing, not in-game animation rendering.
 """
 from pathlib import Path
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -32,6 +33,8 @@ def method(signature):
 
 
 simple = method('private bool HasSimpleFinishMenu()')
+street_protection = source.split('// STREET FINISH PROTECTION', 1)[1].split('// END STREET FINISH PROTECTION', 1)[0]
+version_declaration = re.search(r'private const string SCRIPT_VERSION = [^;]+;', source).group(0)
 master = method('private void HandleAnimationMasterMenu()')
 close_live = method('private void CloseLiveVoiceMenu()')
 keyboard = method('private void OnKeyDown(object sender, KeyEventArgs e)')
@@ -80,28 +83,40 @@ runtime = sorted((dotnet.parent / 'shared/Microsoft.NETCore.App').iterdir())[-1]
 mocks = r'''
 using System;
 using System.Collections.Generic;
-enum Keys { J, Back }
+using System.IO;
+enum Keys { J, Back, NumPad5 }
 class KeyEventArgs { public Keys KeyCode; }
 enum ScriptState { Idle, Animating }
-enum MenuLevel { None, Finish, PartnerVoices, Main }
+enum MenuLevel { None, Finish, PartnerVoices, Main, Club }
+enum ClubDancePhase { Off }
 enum Mode { Car, Street }
 struct Vector3 {
     public float X,Y,Z;
     public Vector3(float x,float y,float z) { X=x;Y=y;Z=z; }
+    public float DistanceTo(Vector3 other) {
+        return (float)Math.Sqrt((X-other.X)*(X-other.X)+(Y-other.Y)*(Y-other.Y)+(Z-other.Z)*(Z-other.Z));
+    }
 }
 class Ped {
     public float Heading, Playhead; public bool Outro;
+    public int Handle; public bool IsAlive=true;
+    public Vector3 Position,Rotation;
     public bool Exists() { return true; }
+    public bool IsInVehicle() { return false; }
     public Vector3 GetOffsetPosition(Vector3 offset) { return offset; }
 }
 enum Hash : ulong {
     IS_DISABLED_CONTROL_PRESSED, IS_DISABLED_CONTROL_JUST_PRESSED,
     SET_ENTITY_ANIM_CURRENT_TIME, SET_ENTITY_ANIM_SPEED,
-    SET_ENTITY_COORDS_NO_OFFSET, TASK_PLAY_ANIM, GET_ANIM_DURATION
+    SET_ENTITY_COORDS_NO_OFFSET, TASK_PLAY_ANIM, GET_ANIM_DURATION,
+    DISABLE_ALL_CONTROL_ACTIONS,ENABLE_CONTROL_ACTION,GET_ENTITY_ANIM_CURRENT_TIME,
+    IS_ENTITY_PLAYING_ANIM,HAS_ANIM_DICT_LOADED,TASK_PLAY_ANIM_ADVANCED
 }
+class Player { public Ped Character; }
 static class Game {
     public static bool Held; public static int GameTime = 1000;
-    public static bool IsKeyPressed(Keys key) { return Held; }
+    public static Player Player=new Player();
+    public static bool IsKeyPressed(Keys key) { return key==Keys.J && Held; }
 }
 static class Function {
     public static bool MasterHeld, MasterPressed, BackPressed;
@@ -112,6 +127,8 @@ static class Function {
         else if (hash == Hash.IS_DISABLED_CONTROL_JUST_PRESSED)
             value = (int)args[1] == 1 ? MasterPressed : BackPressed;
         else if (hash == Hash.GET_ANIM_DURATION) value = 1.0f;
+        else if (hash == Hash.GET_ENTITY_ANIM_CURRENT_TIME) value=((Ped)args[0]).Playhead;
+        else if (hash == Hash.IS_ENTITY_PLAYING_ANIM || hash == Hash.HAS_ANIM_DICT_LOADED) value=true;
         else throw new Exception("Unexpected query: " + hash);
         return (T)value;
     }
@@ -135,15 +152,19 @@ class Harness {
     private const int KEY_COOLDOWN_FRAMES = 12;
     private bool _finishExecutePending, _liveVoiceMenu, _suppressFinishUntilMasterReleased;
     private bool _usingController, tokenKeyboardOpen, _finishInside, _finishForced, _finishAsked;
+    private bool _speechGapKeyboardOpen, _speechGapInputFrame;
+    private ClubDancePhase _clubPhase = ClubDancePhase.Off;
     private bool _finishInsideFreePass, _kissingReverse = true, _streetSitPropActive = true;
     private int _finishExecuteAt, _aLifeFinishInsidePrice, streetActionIdx, _lastRumbleTime;
     private bool _rumblePulseActive, _finishBurstFired, aLifeMode;
     private string currentAction = "sex", currentMaleDict = "male_dict", currentMaleAnim = "male_loop";
     private string currentFemaleDict = "female_dict", currentFemaleAnim = "female_loop";
     private float animSpeed = 1.0f;
+    private float _femaleAnimSpeedScale=1f;
+    private bool _standingBjReverse,_rdoggyReverse;
     private int animWaitTime;
-    private readonly Keys masterKey = Keys.J, menuBackKey = Keys.Back;
-    private int masterControlModifier = 2, masterControl = 1, menuBackControl = 3;
+    private readonly Keys masterKey = Keys.J, menuBackKey = Keys.Back, menuSelectKey=Keys.NumPad5;
+    private int masterControlModifier = 2, masterControl = 1, menuBackControl = 3,menuSelectControl=4;
     private readonly Ped girl = new Ped();
     private readonly Ped player = new Ped();
     private readonly Telemetry _telemetry = new Telemetry();
@@ -154,6 +175,11 @@ class Harness {
     private void SetVibration(ushort left,ushort right) { }
     private void ShowHudStatus(string text,int time) { }
     private bool RequestAnimDict(string dict) { return true; }
+    private void GetStreetAnimData(int action,out string md,out string ma,out string fd,out string fa,
+        out Vector3 off,out float hd,out bool sit,out float zo,out float rx) {
+        md=currentMaleDict;ma=currentMaleAnim;fd=currentFemaleDict;fa=currentFemaleAnim;
+        off=new Vector3();hd=0;sit=false;zo=0;rx=0;
+    }
     private void GetStreetPropIntroExitAnimData(int phase,int action,out string md,out string ma,
         out string fd,out string fa,out Vector3 off,out float hd,out bool sit,out float zo,out float rx,out float rh) {
         md="md";ma="ma";fd="fd";fa="fa";off=new Vector3();hd=0;sit=true;zo=0;rx=0;rh=0;
@@ -164,6 +190,7 @@ tests = r'''
     private static int count;
     private static void Check(bool value,string name) { count++; if (!value) throw new Exception("FAIL: " + name); }
     private void Step(bool held) {
+        Game.Player.Character=player;player.Handle=1;girl.Handle=2;
         if (keyCooldown>0) keyCooldown--;
         Game.Held=held; Function.MasterHeld=held; Function.MasterPressed=held && !previousHeld;
         previousHeld=held;
@@ -223,7 +250,7 @@ tests = r'''
             Check(h.DrawnItems.Count==1 && h.DrawnItems[0]=="Finish","simple menu draws one finish row");
             int mutations=Function.Mutations;h.Step(true);h.ExecuteSimplePending(h.player);
             Check(h.animPhase==2 && !h._finishExecutePending && Function.Mutations==mutations,"simple action transition cannot run before selection");
-            h.SelectFinishChoice();
+            h.keyCooldown=0;h.OnKeyUp(null,new KeyEventArgs{KeyCode=Keys.NumPad5});h.SelectFinishChoice();
             Check(h._finishExecutePending && h.menuLevel==MenuLevel.None && h.animPhase==2 && Function.Mutations==mutations,"explicit simple Finish only schedules transition");
             h.ExecuteSimplePending(h.player);
             Check(!h._finishExecutePending && h.animPhase==3 && Function.Mutations>mutations,"simple transition begins only after explicit choice");
@@ -244,7 +271,7 @@ with tempfile.TemporaryDirectory(prefix='cinnamon-finish-tests-') as directory:
     temp = Path(directory)
     cs = temp / 'FinishTests.cs'
     dll = temp / 'FinishTests.dll'
-    cs.write_text(mocks + simple + master + close_live + keyboard + controller + poll_release
+    cs.write_text(mocks + version_declaration + street_protection + simple + master + close_live + keyboard + controller + poll_release
                   + tick + select + options + draw + pending_guard + back + tests)
     rsp = temp / 'refs.rsp'
     rsp.write_text('\n'.join('/r:' + str(p) for p in refs.glob('*.dll')))

@@ -627,6 +627,7 @@ namespace CinnamonCoffee
         {
             Tick    += OnTick;
             KeyDown += OnKeyDown;
+            KeyUp   += OnKeyUp;
             Aborted += OnAborted;
             Interval = 0;
 
@@ -5718,7 +5719,7 @@ namespace CinnamonCoffee
                 }
             }
             bool hotkey = !_usingController && Game.IsKeyPressed(Keys.F7);
-            bool toggle = hotkey && !_clubHotkeyWasDown;
+            bool toggle = hotkey && !_clubHotkeyWasDown && !_speechGapKeyboardOpen && !_speechGapInputFrame;
             _clubHotkeyWasDown = hotkey;
             bool master = _usingController
                 ? Function.Call<bool>(Hash.IS_DISABLED_CONTROL_PRESSED, 0, masterControlModifier)
@@ -5846,6 +5847,8 @@ namespace CinnamonCoffee
         {
             if (menuIndex == 0) SelectPartnerVoice("");
             else if (menuIndex == 1) PreviewPartnerVoice();
+            else if (menuIndex == 2 + _partnerVoices.Count) OpenSpeechGapKeyboard();
+            else if (menuIndex == 3 + _partnerVoices.Count) ApplySpeechGap(-1d);
             else
             {
                 int index = menuIndex - 2;
@@ -5877,9 +5880,102 @@ namespace CinnamonCoffee
                 PartnerVoiceEntry voice = _partnerVoices[i];
                 DrawMenuItem((voice.Name == partnerVoice ? "~g~" : "") + voice.Label, 2 + i, x, ref y, lh);
             }
+            DrawMenuItem("Speech gap: " + SpeechGapLabel() + " [>]", 2 + _partnerVoices.Count, x, ref y, lh, 0.27f);
+            DrawMenuItem("Use random 2-5 second gap", 3 + _partnerVoices.Count, x, ref y, lh, 0.27f);
         }
+        // SPEECH GAP SETTINGS
+        private double partnerSpeechGapSeconds = -1d;
+        private const double MAX_SPEECH_GAP_SECONDS = 2147483d;
+        private bool _partnerLoopDeadlineSet, _hasPartnerSpeechEnded;
+        private int _lastPartnerSpeechEndedAt;
+        private bool _speechGapKeyboardOpen, _speechGapInputFrame;
+
+        private static bool TryParseSpeechGap(string text, out double seconds)
+        {
+            seconds = -1d;
+            if (text == null) return false;
+            text = text.Trim();
+            if (text.Equals("random", StringComparison.OrdinalIgnoreCase)) return true;
+            double value;
+            if (!double.TryParse(text.Replace(',', '.'), System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out value)
+                || double.IsNaN(value) || double.IsInfinity(value)
+                || (value < 0d && value != -1d) || value > MAX_SPEECH_GAP_SECONDS) return false;
+            seconds = value;
+            return true;
+        }
+
+        private string SpeechGapLabel()
+        {
+            return partnerSpeechGapSeconds < 0d ? "Random 2-5 s"
+                : partnerSpeechGapSeconds.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture) + " s";
+        }
+
+        private int GetPartnerSpeechGapMilliseconds()
+        {
+            return partnerSpeechGapSeconds < 0d ? rng.Next(2000, 5001)
+                : (int)Math.Round(partnerSpeechGapSeconds * 1000d, MidpointRounding.AwayFromZero);
+        }
+
+        private void SchedulePartnerLoopSpeech(int from, int milliseconds)
+        {
+            _nextPartnerLoopSpeechAt = unchecked(from + milliseconds);
+            _partnerLoopDeadlineSet = true;
+        }
+
+        private bool IsPartnerLoopSpeechDue()
+        {
+            return !_partnerLoopDeadlineSet || unchecked(Game.GameTime - _nextPartnerLoopSpeechAt) >= 0;
+        }
+
+        private void ApplySpeechGap(double seconds)
+        {
+            partnerSpeechGapSeconds = seconds;
+            if (_hasPartnerSpeechEnded && !_speechObservedActive && !_speechRequestPending)
+                SchedulePartnerLoopSpeech(_lastPartnerSpeechEndedAt, GetPartnerSpeechGapMilliseconds());
+            SaveSettings();
+        }
+
+        private static void StoreSpeechGapSetting(List<string> lines, double seconds)
+        {
+            string value = "partnerSpeechGapSeconds=" + seconds.ToString("R", System.Globalization.CultureInfo.InvariantCulture);
+            bool found = false;
+            for (int i = 0; i < lines.Count; i++)
+                if (lines[i].TrimStart().StartsWith("partnerSpeechGapSeconds=", StringComparison.Ordinal))
+                { lines[i] = value; found = true; }
+            if (!found) lines.Add(value);
+        }
+
+        private void OpenSpeechGapKeyboard()
+        {
+            if (_speechGapKeyboardOpen || tokenKeyboardOpen) return;
+            string initial = partnerSpeechGapSeconds.ToString("R", System.Globalization.CultureInfo.InvariantCulture);
+            Function.Call(Hash.DISPLAY_ONSCREEN_KEYBOARD, true, "FMMC_KEY_TIP8", "", initial, "", "", "", 32);
+            _speechGapKeyboardOpen = true;
+            _speechGapInputFrame = true;
+            _suppressFinishUntilMasterReleased = true;
+            ShowHudStatus("SECONDS: 0 OR MORE | -1 = RANDOM 2-5", 5000);
+        }
+
+        private void PollSpeechGapKeyboard()
+        {
+            int status = Function.Call<int>(Hash.UPDATE_ONSCREEN_KEYBOARD);
+            if (status == 0) return;
+            _speechGapKeyboardOpen = false;
+            _suppressFinishUntilMasterReleased = true;
+            keyCooldown = KEY_COOLDOWN_FRAMES;
+            _menuControlCooldown = KEY_COOLDOWN_FRAMES;
+            if (status != 1) return;
+            double seconds;
+            if (!TryParseSpeechGap(Function.Call<string>(Hash.GET_ONSCREEN_KEYBOARD_RESULT), out seconds))
+            { ShowHudStatus("~y~ENTER NON-NEGATIVE SECONDS, OR -1 FOR RANDOM", 4000); return; }
+            ApplySpeechGap(seconds);
+            ShowHudStatus("~g~SPEECH GAP: " + SpeechGapLabel(), 3000);
+        }
+        // END SPEECH GAP SETTINGS
+
         // PARTNER AUDIO SCHEDULER
-        private const string SCRIPT_VERSION = "1.3";
+        private const string SCRIPT_VERSION = "1.4";
         private const string VOICE_FIX_VERSION = SCRIPT_VERSION;
         private const int SPEECH_LAUNCH_GRACE_MS = 1200;
         private const int SPEECH_END_QUIET_MS = 450;
@@ -5947,7 +6043,7 @@ namespace CinnamonCoffee
                             + " speech start not acknowledged; bank=" + partnerVoice + "; event=" + _lastSpeechName + Environment.NewLine); } catch { }
                     }
                     // Retain the last request identity briefly: an engine start can arrive after timeout.
-                    _nextPartnerLoopSpeechAt = now + 750;
+                    SchedulePartnerLoopSpeech(now, 750);
                     return false;
                 }
             }
@@ -5973,8 +6069,10 @@ namespace CinnamonCoffee
             _speechObservedActive = false;
             _speechQuietStarted = false;
             _speechLaunchPedHandle = 0;
-            // Draw exactly one 2–5 second gap, measured from the first stable-end observation.
-            _nextPartnerLoopSpeechAt = _speechQuietSince + rng.Next(2000, 5001);
+            // Schedule the configured gap once, measured from the first stable-end observation.
+            _lastPartnerSpeechEndedAt = _speechQuietSince;
+            _hasPartnerSpeechEnded = true;
+            SchedulePartnerLoopSpeech(_speechQuietSince, GetPartnerSpeechGapMilliseconds());
             return false;
         }
 
@@ -6122,7 +6220,7 @@ namespace CinnamonCoffee
             _liveVoiceKeyWasDown = keyDown;
             if (_liveVoiceMenu && (menuLevel != MenuLevel.PartnerVoices || state != ScriptState.Animating || animPhase != 2 || _finishExecutePending))
                 CloseLiveVoiceMenu();
-            if (tokenKeyboardOpen) return;
+            if (tokenKeyboardOpen || _speechGapKeyboardOpen || _speechGapInputFrame) return;
             bool controllerToggle = _usingController
                 && Function.Call<bool>(Hash.IS_DISABLED_CONTROL_PRESSED, 0, masterControlModifier)
                 && Function.Call<bool>(Hash.IS_DISABLED_CONTROL_JUST_PRESSED, 0, GTA.Control.FrontendY);
@@ -6144,6 +6242,8 @@ namespace CinnamonCoffee
             _lastSpeechName = "";
             _speechQuietStarted = false;
             _nextPartnerLoopSpeechAt = 0;
+            _partnerLoopDeadlineSet = false;
+            _hasPartnerSpeechEnded = false;
             if (_directorModeAudioActive)
             {
                 Function.Call(Hash.SET_AUDIO_FLAG, "IsDirectorModeActive", false);
@@ -6179,6 +6279,11 @@ namespace CinnamonCoffee
                             slapSoundsEnabled = trimmed.Substring(18).Trim().ToLower() == "true";
                         else if (trimmed.StartsWith("bjSoundsEnabled="))
                             bjSoundsEnabled = trimmed.Substring(16).Trim().ToLower() == "true";
+                        else if (trimmed.StartsWith("partnerSpeechGapSeconds="))
+                        {
+                            double seconds;
+                            if (TryParseSpeechGap(trimmed.Substring("partnerSpeechGapSeconds=".Length), out seconds)) partnerSpeechGapSeconds = seconds;
+                        }
                         else if (trimmed.StartsWith("partnerVoice="))
                             partnerVoice = NormalizePartnerVoice(trimmed.Substring("partnerVoice=".Length)) ?? "";
                         else if (trimmed.StartsWith("femaleServiceVoice="))
@@ -6494,6 +6599,7 @@ namespace CinnamonCoffee
                 if (!updated.Contains("sinkraReplaceRevLaying"))   lines.Add("sinkraReplaceRevLaying="   + sinkraReplaceRevLaying.ToString().ToLower());
                 if (!updated.Contains("sinkraReplaceFacesitting")) lines.Add("sinkraReplaceFacesitting=" + sinkraReplaceFacesitting.ToString().ToLower());
 
+                StoreSpeechGapSetting(lines, partnerSpeechGapSeconds);
                 File.WriteAllLines(SETTINGS_FILE, lines.ToArray());
             }
             catch { }
@@ -7003,7 +7109,7 @@ namespace CinnamonCoffee
         // ═════════
         private void OnKeyDown(object sender, KeyEventArgs e)
         {
-            if (tokenKeyboardOpen) return;
+            if (tokenKeyboardOpen || _speechGapKeyboardOpen || _speechGapInputFrame) return;
             if (_usingController) return;  // keyboard ignored when gamepad is active
             if (menuLevel == MenuLevel.Club && e.KeyCode == menuBackKey)
             { menuLevel = MenuLevel.None; keyCooldown = KEY_COOLDOWN_FRAMES; return; }
@@ -7045,6 +7151,9 @@ namespace CinnamonCoffee
             }
             else if (e.KeyCode == menuSelectKey)
             {
+                if (_menuSelectKeyDown) return;
+                _menuSelectKeyDown = true;
+                if (menuLevel == MenuLevel.Finish && (!_finishSelectionArmed || keyCooldown > 0)) return;
                 HandleMenuSelect();
             }
             else if (e.KeyCode == menuBackKey)
@@ -7268,7 +7377,7 @@ namespace CinnamonCoffee
         /// <summary>Mirrors OnKeyDown for gamepad. Called every frame from OnTick when a controller is active.</summary>
         private void HandleControllerMenuInput()
         {
-            if (tokenKeyboardOpen) return;
+            if (tokenKeyboardOpen || _speechGapKeyboardOpen || _speechGapInputFrame) return;
             if (_menuControlCooldown > 0) return;
             if (menuLevel == MenuLevel.Club && Function.Call<bool>(Hash.IS_DISABLED_CONTROL_JUST_PRESSED, 0, menuBackControl))
             { menuLevel = MenuLevel.None; _menuControlCooldown = KEY_COOLDOWN_FRAMES; return; }
@@ -7721,7 +7830,7 @@ namespace CinnamonCoffee
             }
             else if (menuLevel == MenuLevel.PartnerVoices)
             {
-                return 2 + _partnerVoices.Count;
+                return 4 + _partnerVoices.Count;
             }
             return 0;
         }
@@ -8094,6 +8203,8 @@ namespace CinnamonCoffee
             }
             else if (menuLevel == MenuLevel.Finish)
             {
+                if (!_finishSelectionArmed || keyCooldown > 0) return;
+                _finishSelectionArmed = false;
                 if (HasSimpleFinishMenu())
                 {
                     _finishInside = false;
@@ -10250,6 +10361,8 @@ namespace CinnamonCoffee
         {
             _telemetry.Poll(); // drain pong datagrams on the game thread (non-blocking)
             TickCustomSound();
+            _speechGapInputFrame = _speechGapKeyboardOpen;
+            if (_speechGapKeyboardOpen) PollSpeechGapKeyboard();
             TickPartnerAudio(); // Apply a requested voice only between complete speech lines.
             TickPostSexVoice(); // post-sex voice: poll IS_AMBIENT_SPEECH_PLAYING → 1s delay → HOOKER_OFFER_AGAIN + reopen menu
 
@@ -10437,6 +10550,7 @@ namespace CinnamonCoffee
 
             // ── Controller menu navigation (mirrors OnKeyDown for gamepads) ──
             PollLiveVoiceMenuToggle();
+            UpdateFinishSelectionLatch();
             if (_usingController) HandleControllerMenuInput();
 
             // ── GTA on-screen keyboard polling (token input) ───────────────
@@ -11175,7 +11289,7 @@ namespace CinnamonCoffee
             bool masterTriggered = _usingController
                 ? (Function.Call<bool>(Hash.IS_DISABLED_CONTROL_PRESSED, 0, masterControlModifier) && Function.Call<bool>(Hash.IS_DISABLED_CONTROL_JUST_PRESSED, 0, masterControl))
                 : Game.IsKeyPressed(masterKey);
-            if (masterTriggered && keyCooldown == 0)
+            if (masterTriggered && !_speechGapKeyboardOpen && !_speechGapInputFrame && keyCooldown == 0)
             {
                 keyCooldown = KEY_COOLDOWN_FRAMES;
                 if (menuLevel != MenuLevel.None)
@@ -11247,6 +11361,177 @@ namespace CinnamonCoffee
         // ═══════════════
         // ANIMATING STATE
         // ═══════════════
+        // STREET FINISH PROTECTION
+        private bool _menuSelectKeyDown;
+        private bool _finishSelectionArmed = true;
+        private bool _streetFinishGuardActive;
+        private int _streetFinishPlayerHandle, _streetFinishGirlHandle;
+        private string _streetFinishMaleDict, _streetFinishMaleClip, _streetFinishFemaleDict, _streetFinishFemaleClip;
+        private Vector3 _streetFinishMalePosition, _streetFinishFemalePosition;
+        private Vector3 _streetFinishMaleRotation, _streetFinishFemaleRotation;
+        private float _streetFinishLastMalePhase, _streetFinishLastFemalePhase;
+        private bool _streetFinishMaleRecoveryPending, _streetFinishFemaleRecoveryPending;
+        private int _streetFinishMaleRecoveryAt, _streetFinishFemaleRecoveryAt;
+
+        private bool IsFinishSelectHeld()
+        {
+            return _usingController
+                ? Function.Call<bool>(Hash.IS_DISABLED_CONTROL_PRESSED, 0, menuSelectControl)
+                : Game.IsKeyPressed(menuSelectKey);
+        }
+
+        private void ArmFinishSelection()
+        {
+            _finishSelectionArmed = !IsFinishSelectHeld();
+            _menuSelectKeyDown = Game.IsKeyPressed(menuSelectKey);
+        }
+
+        private void UpdateFinishSelectionLatch()
+        {
+            if (menuLevel == MenuLevel.Finish && !IsFinishSelectHeld()) _finishSelectionArmed = true;
+        }
+
+        private void OnKeyUp(object sender, KeyEventArgs e)
+        {
+            if (e.KeyCode != menuSelectKey) return;
+            _menuSelectKeyDown = false;
+            if (menuLevel == MenuLevel.Finish) _finishSelectionArmed = true;
+        }
+
+        private void ProtectStreetAnimationControls()
+        {
+            if (state != ScriptState.Animating || mode != Mode.Street || animPhase != 2) return;
+            Function.Call(Hash.DISABLE_ALL_CONTROL_ACTIONS, 0);
+            Function.Call(Hash.ENABLE_CONTROL_ACTION, 0, 0, true);
+            Function.Call(Hash.ENABLE_CONTROL_ACTION, 0, 1, true);
+            Function.Call(Hash.ENABLE_CONTROL_ACTION, 0, 2, true);
+            Function.Call(Hash.ENABLE_CONTROL_ACTION, 0, 26, true);
+            Function.Call(Hash.ENABLE_CONTROL_ACTION, 0, 199, true);
+            Function.Call(Hash.ENABLE_CONTROL_ACTION, 0, 200, true);
+            RememberStreetLoopPhases(Game.Player.Character);
+        }
+
+        private void RememberStreetLoopPhases(Ped player)
+        {
+            if (_streetFinishGuardActive || player == null || girl == null || !player.Exists() || !girl.Exists()
+                || string.IsNullOrEmpty(currentMaleDict) || string.IsNullOrEmpty(currentMaleAnim)
+                || string.IsNullOrEmpty(currentFemaleDict) || string.IsNullOrEmpty(currentFemaleAnim)) return;
+            bool same = _streetFinishPlayerHandle == player.Handle && _streetFinishGirlHandle == girl.Handle
+                && _streetFinishMaleDict == currentMaleDict && _streetFinishMaleClip == currentMaleAnim
+                && _streetFinishFemaleDict == currentFemaleDict && _streetFinishFemaleClip == currentFemaleAnim;
+            if (!same)
+            {
+                _streetFinishLastMalePhase = _streetFinishLastFemalePhase = 0f;
+                _streetFinishPlayerHandle = player.Handle; _streetFinishGirlHandle = girl.Handle;
+                _streetFinishMaleDict = currentMaleDict; _streetFinishMaleClip = currentMaleAnim;
+                _streetFinishFemaleDict = currentFemaleDict; _streetFinishFemaleClip = currentFemaleAnim;
+            }
+            if (Function.Call<bool>(Hash.IS_ENTITY_PLAYING_ANIM, player, currentMaleDict, currentMaleAnim, 3))
+                _streetFinishLastMalePhase = SafeStreetFinishPhase(Function.Call<float>(Hash.GET_ENTITY_ANIM_CURRENT_TIME, player, currentMaleDict, currentMaleAnim));
+            if (Function.Call<bool>(Hash.IS_ENTITY_PLAYING_ANIM, girl, currentFemaleDict, currentFemaleAnim, 3))
+                _streetFinishLastFemalePhase = SafeStreetFinishPhase(Function.Call<float>(Hash.GET_ENTITY_ANIM_CURRENT_TIME, girl, currentFemaleDict, currentFemaleAnim));
+        }
+
+        private void LogStreetFinish(string message)
+        {
+            try { System.IO.File.AppendAllText("scripts\\CinnamonCoffeeInput.log", DateTime.UtcNow.ToString("o")
+                + " v" + SCRIPT_VERSION + " street=" + streetActionIdx + " phase=" + animPhase + " " + message + Environment.NewLine); } catch { }
+        }
+
+        private void CaptureStreetFinishPair()
+        {
+            _streetFinishGuardActive = false;
+            Ped player = Game.Player.Character;
+            if (mode != Mode.Street || animPhase != 2 || player == null || !player.Exists()
+                || girl == null || !girl.Exists() || !player.IsAlive || !girl.IsAlive
+                || string.IsNullOrEmpty(currentMaleDict) || string.IsNullOrEmpty(currentMaleAnim)
+                || string.IsNullOrEmpty(currentFemaleDict) || string.IsNullOrEmpty(currentFemaleAnim)) return;
+            RememberStreetLoopPhases(player);
+            _streetFinishPlayerHandle = player.Handle;
+            _streetFinishGirlHandle = girl.Handle;
+            _streetFinishMaleDict = currentMaleDict;
+            _streetFinishMaleClip = currentMaleAnim;
+            _streetFinishFemaleDict = currentFemaleDict;
+            _streetFinishFemaleClip = currentFemaleAnim;
+            _streetFinishMalePosition = player.Position;
+            _streetFinishFemalePosition = girl.Position;
+            string md, ma, fd, fa; Vector3 offset; float heading, zOffset, rotX; bool sitting;
+            GetStreetAnimData(streetActionIdx, out md, out ma, out fd, out fa, out offset, out heading, out sitting, out zOffset, out rotX);
+            _streetFinishMaleRotation = new Vector3(rotX, 0f, player.Heading);
+            _streetFinishFemaleRotation = girl.Rotation;
+            _streetFinishMaleRecoveryPending = _streetFinishFemaleRecoveryPending = false;
+            _streetFinishGuardActive = true;
+            LogStreetFinish("finish menu opened; player=" + player.Handle + "; partner=" + girl.Handle);
+        }
+
+        private static float SafeStreetFinishPhase(float phase)
+        {
+            return float.IsNaN(phase) || float.IsInfinity(phase) ? 0f : Math.Max(0f, Math.Min(phase, 0.99f));
+        }
+
+        private void MaintainStreetFinishPair(Ped player)
+        {
+            if (menuLevel != MenuLevel.Finish || _finishExecutePending || state != ScriptState.Animating
+                || mode != Mode.Street || animPhase != 2)
+            { _streetFinishGuardActive = false; return; }
+            if (!_streetFinishGuardActive || player == null || girl == null || !player.Exists() || !girl.Exists()
+                || !player.IsAlive || !girl.IsAlive || player.IsInVehicle() || girl.IsInVehicle()
+                || player.Handle != _streetFinishPlayerHandle || girl.Handle != _streetFinishGirlHandle
+                || currentMaleDict != _streetFinishMaleDict || currentMaleAnim != _streetFinishMaleClip
+                || currentFemaleDict != _streetFinishFemaleDict || currentFemaleAnim != _streetFinishFemaleClip
+                || player.Position.DistanceTo(_streetFinishMalePosition) > 2f
+                || girl.Position.DistanceTo(_streetFinishFemalePosition) > 2f) return;
+            float speed = animSpeed;
+            if ((streetActionIdx == 0 && _kissingReverse) || (streetActionIdx == 2 && _standingBjReverse)
+                || (streetActionIdx == 11 && _rdoggyReverse)) speed = -speed;
+            bool malePlaying = Function.Call<bool>(Hash.IS_ENTITY_PLAYING_ANIM, player, currentMaleDict, currentMaleAnim, 3);
+            bool femalePlaying = Function.Call<bool>(Hash.IS_ENTITY_PLAYING_ANIM, girl, currentFemaleDict, currentFemaleAnim, 3);
+            if (malePlaying)
+            {
+                if (_streetFinishMaleRecoveryPending)
+                    Function.Call(Hash.SET_ENTITY_ANIM_SPEED, player, currentMaleDict, currentMaleAnim, speed);
+                _streetFinishLastMalePhase = SafeStreetFinishPhase(Function.Call<float>(Hash.GET_ENTITY_ANIM_CURRENT_TIME, player, currentMaleDict, currentMaleAnim));
+                _streetFinishMaleRecoveryPending = false;
+            }
+            if (femalePlaying)
+            {
+                if (_streetFinishFemaleRecoveryPending)
+                {
+                    // TASK_PLAY_ANIM may become active on a later frame. Its playback-rate argument is not an initial phase.
+                    Function.Call(Hash.SET_ENTITY_ANIM_CURRENT_TIME, girl, currentFemaleDict, currentFemaleAnim, _streetFinishLastFemalePhase);
+                    Function.Call(Hash.SET_ENTITY_ANIM_SPEED, girl, currentFemaleDict, currentFemaleAnim, speed * _femaleAnimSpeedScale);
+                }
+                _streetFinishLastFemalePhase = SafeStreetFinishPhase(Function.Call<float>(Hash.GET_ENTITY_ANIM_CURRENT_TIME, girl, currentFemaleDict, currentFemaleAnim));
+                _streetFinishFemaleRecoveryPending = false;
+            }
+            if (malePlaying && femalePlaying) return;
+            if (!Function.Call<bool>(Hash.HAS_ANIM_DICT_LOADED, currentMaleDict)
+                || !Function.Call<bool>(Hash.HAS_ANIM_DICT_LOADED, currentFemaleDict)) return;
+            int flags = streetActionIdx == 0 ? 10 : 9;
+            if (!malePlaying && (!_streetFinishMaleRecoveryPending || unchecked(Game.GameTime - _streetFinishMaleRecoveryAt) >= 500))
+            {
+                Vector3 p = _streetFinishMalePosition, r = _streetFinishMaleRotation;
+                Function.Call(Hash.TASK_PLAY_ANIM_ADVANCED, player, currentMaleDict, currentMaleAnim,
+                    p.X, p.Y, p.Z, r.X, r.Y, r.Z, 8f, -4f, -1, flags, _streetFinishLastMalePhase, 2, 0);
+                Function.Call(Hash.SET_ENTITY_ANIM_SPEED, player, currentMaleDict, currentMaleAnim, speed);
+                _streetFinishMaleRecoveryPending = true;
+                _streetFinishMaleRecoveryAt = Game.GameTime;
+                LogStreetFinish("restored player clip at " + _streetFinishLastMalePhase.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            }
+            if (!femalePlaying && (!_streetFinishFemaleRecoveryPending || unchecked(Game.GameTime - _streetFinishFemaleRecoveryAt) >= 500))
+            {
+                girl.Heading = _streetFinishFemaleRotation.Z;
+                Function.Call(Hash.TASK_PLAY_ANIM, girl, currentFemaleDict, currentFemaleAnim,
+                    8f, -4f, -1, flags, 0f, false, false, false);
+                Function.Call(Hash.SET_ENTITY_ANIM_CURRENT_TIME, girl, currentFemaleDict, currentFemaleAnim, _streetFinishLastFemalePhase);
+                Function.Call(Hash.SET_ENTITY_ANIM_SPEED, girl, currentFemaleDict, currentFemaleAnim, speed * _femaleAnimSpeedScale);
+                _streetFinishFemaleRecoveryPending = true;
+                _streetFinishFemaleRecoveryAt = Game.GameTime;
+                LogStreetFinish("restored partner clip at " + _streetFinishLastFemalePhase.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            }
+        }
+        // END STREET FINISH PROTECTION
+
         private bool HasSimpleFinishMenu()
         {
             return currentAction == "kissing" || currentAction == "facesitting";
@@ -11261,10 +11546,13 @@ namespace CinnamonCoffee
             if (state != ScriptState.Animating || animPhase != 2 || _finishExecutePending || _liveVoiceMenu) return;
             if (menuLevel == MenuLevel.Finish)
             {
+                _streetFinishGuardActive = false;
                 menuLevel = MenuLevel.None;
                 return;
             }
             if (menuLevel != MenuLevel.None) return;
+            CaptureStreetFinishPair();
+            ArmFinishSelection();
             menuLevel = MenuLevel.Finish;
             menuIndex = 0;
         }
@@ -11276,6 +11564,8 @@ namespace CinnamonCoffee
                 EndAnimation();
                 return;
             }
+
+            ProtectStreetAnimationControls();
 
             // Disable phone during animations (control 27 = PHONE)
             Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, 27, true);
@@ -11339,7 +11629,7 @@ namespace CinnamonCoffee
 
             // Animation speed controls request cadence, never the duration of a speech line.
             int now = Game.GameTime;
-            if (currentAction != "" && animPhase == 2 && animSpeed > 0f && now >= _nextPartnerLoopSpeechAt
+            if (currentAction != "" && animPhase == 2 && animSpeed > 0f && IsPartnerLoopSpeechDue()
                 && !IsPartnerSpeechBusy(girl) && !_pendingPartnerVoiceChange && !HasQueuedPartnerSpeech())
             {
                 if (PlayMoaningSounds()) lastVoiceTime = now;
@@ -11539,7 +11829,8 @@ namespace CinnamonCoffee
 
             // Speed control during loop phase
             if (speedCooldown > 0) speedCooldown--;
-            if (animPhase == 2 && speedCooldown == 0 && !_finishExecutePending && !_liveVoiceMenu && (!_bjThroatPending && _throatLockAt == 0 && !_throatSpeedLocked))
+            if (animPhase == 2 && speedCooldown == 0 && !_finishExecutePending && !_liveVoiceMenu
+                && !_speechGapKeyboardOpen && !_speechGapInputFrame && (!_bjThroatPending && _throatLockAt == 0 && !_throatSpeedLocked))
             {
                 bool changed = false;
                 bool noMasterMod = !Function.Call<bool>(Hash.IS_DISABLED_CONTROL_PRESSED, 0, masterControlModifier);
@@ -12143,8 +12434,10 @@ namespace CinnamonCoffee
             bool masterTriggered = _usingController
                 ? (Function.Call<bool>(Hash.IS_DISABLED_CONTROL_PRESSED, 0, masterControlModifier) && Function.Call<bool>(Hash.IS_DISABLED_CONTROL_JUST_PRESSED, 0, masterControl))
                 : Game.IsKeyPressed(masterKey);
-            if (masterTriggered && keyCooldown == 0 && !_liveVoiceMenu && !_suppressFinishUntilMasterReleased)
+            if (masterTriggered && !_speechGapKeyboardOpen && !_speechGapInputFrame && keyCooldown == 0 && !_liveVoiceMenu && !_suppressFinishUntilMasterReleased)
                 HandleAnimationMasterMenu();
+
+            MaintainStreetFinishPair(player);
 
             // Execute the actual finish once the Finish menu choice is resolved
             if (_finishExecutePending && menuLevel == MenuLevel.None && Game.GameTime >= _finishExecuteAt)
@@ -18292,6 +18585,14 @@ namespace CinnamonCoffee
 
         private void FullReset(bool keepGirlTask = false)
         {
+            _streetFinishGuardActive = false;
+            _menuSelectKeyDown = false;
+            _finishSelectionArmed = true;
+            if (_speechGapKeyboardOpen)
+            {
+                Function.Call(Hash.CANCEL_ONSCREEN_KEYBOARD);
+                _speechGapKeyboardOpen = false;
+            }
             StopClubDance(false);
             _telemetry.SendStop();
             DetachDildoProp();
@@ -18440,7 +18741,7 @@ namespace CinnamonCoffee
 
             // ── Header title "CINNAMON COFFEE" — vertically centered in the header bar ──
             float hdrTextY = TOP + (HDR_H * 0.5f) - 0.014f;
-            DrawMenuText("CINNAMON COFFEE 1.3", PX + PAD, hdrTextY, W - PAD * 2f, 0.38f, true, 210, 125, 45, 255, 7);
+            DrawMenuText("CINNAMON COFFEE 1.4", PX + PAD, hdrTextY, W - PAD * 2f, 0.38f, true, 210, 125, 45, 255, 7);
 
             // ── Pass 3: redraw items on top of background ────────────────────────
             float y = TOP + HDR_H + 0.016f;
