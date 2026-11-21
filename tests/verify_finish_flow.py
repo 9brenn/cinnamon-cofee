@@ -34,6 +34,7 @@ def method(signature):
 
 simple = method('private bool HasSimpleFinishMenu()')
 street_protection = source.split('// STREET FINISH PROTECTION', 1)[1].split('// END STREET FINISH PROTECTION', 1)[0]
+master_input = source.split('// KEYBOARD MASTER INPUT', 1)[1].split('// END KEYBOARD MASTER INPUT', 1)[0]
 version_declaration = re.search(r'private const string SCRIPT_VERSION = [^;]+;', source).group(0)
 master = method('private void HandleAnimationMasterMenu()')
 close_live = method('private void CloseLiveVoiceMenu()')
@@ -194,6 +195,7 @@ tests = r'''
         if (keyCooldown>0) keyCooldown--;
         Game.Held=held; Function.MasterHeld=held; Function.MasterPressed=held && !previousHeld;
         previousHeld=held;
+        SampleKeyboardMasterInput();
         PollMasterRelease(); TickMasterInput();
     }
     private bool previousHeld;
@@ -271,7 +273,7 @@ with tempfile.TemporaryDirectory(prefix='cinnamon-finish-tests-') as directory:
     temp = Path(directory)
     cs = temp / 'FinishTests.cs'
     dll = temp / 'FinishTests.dll'
-    cs.write_text(mocks + version_declaration + street_protection + simple + master + close_live + keyboard + controller + poll_release
+    cs.write_text(mocks + version_declaration + master_input + street_protection + simple + master + close_live + keyboard + controller + poll_release
                   + tick + select + options + draw + pending_guard + back + tests)
     rsp = temp / 'refs.rsp'
     rsp.write_text('\n'.join('/r:' + str(p) for p in refs.glob('*.dll')))

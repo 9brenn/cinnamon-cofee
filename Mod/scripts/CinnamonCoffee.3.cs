@@ -576,7 +576,8 @@ namespace CinnamonCoffee
         private float roughDoggyDeviceSpeed       = 0.20f;
         private float deviceSpeedRamp              = 3.0f; // animSpeed at which device reaches 100%
         private int speedCooldown = 0; // Cooldown for speed change keys
-        private readonly TelemetrySender _telemetry = new TelemetrySender();
+        private readonly TelemetrySender _telemetry;
+        private CinnamonCoffeeInstanceLease _instanceLease;
 
         // -- Healing --
         private int lastHealTime = 0;
@@ -625,45 +626,92 @@ namespace CinnamonCoffee
 
         public CinnamonCoffee()
         {
-            Tick    += OnTick;
-            KeyDown += OnKeyDown;
-            KeyUp   += OnKeyUp;
-            Aborted += OnAborted;
-            Interval = 0;
+            if (!CinnamonCoffeeInstanceLease.TryAcquire(out _instanceLease))
+            {
+                WriteStartupStatus("DUPLICATE INACTIVE - run Install-CinnamonCoffee to remove copied scripts");
+                try { _waveMixer.Dispose(); } catch { }
+                return; // No input/tick/abort handlers: never disturb the active owner's tasks or audio.
+            }
+            try
+            {
+                _telemetry = new TelemetrySender();
+                Tick    += OnTick;
+                KeyDown += OnKeyDown;
+                KeyUp   += OnKeyUp;
+                Aborted += OnAborted;
+                Interval = 0;
 
-            LoadSettings();
-            LoadPartnerVoiceCatalogue();
-            LoadALife();
-            _telemetry.SetToken(deviceToken);
-            _telemetry.SetStrokeRange(strokeMin, strokeMax, readyAndFinishDelay);
-            LoadBjSounds();
+                LoadSettings();
+                LoadPartnerVoiceCatalogue();
+                LoadALife();
+                _telemetry.SetToken(deviceToken);
+                _telemetry.SetStrokeRange(strokeMin, strokeMax, readyAndFinishDelay);
+                LoadBjSounds();
 
-            // Detect optional modded animation dict for Laying Cowgirl / Laying Reversed Cowgirl.
-            // Falls back to vanilla random@drunk_driver_2 if the dict is absent.
-            _sinkraCowgirlAvailable = Function.Call<bool>(Hash.DOES_ANIM_DICT_EXIST, "cowgirl@sinkra");
+                // Detect optional modded animation dict for Laying Cowgirl / Laying Reversed Cowgirl.
+                // Falls back to vanilla random@drunk_driver_2 if the dict is absent.
+                _sinkraCowgirlAvailable = Function.Call<bool>(Hash.DOES_ANIM_DICT_EXIST, "cowgirl@sinkra");
 
-            // Pre-hash s_f_y_hooker_01..99 for Prostitution A-Life model detection
-            for (int _hi = 1; _hi <= 99; _hi++)
-                _hookerModelHashes.Add(Function.Call<int>(Hash.GET_HASH_KEY, string.Format("s_f_y_hooker_{0:D2}", _hi)));
+                // Pre-hash s_f_y_hooker_01..99 for Prostitution A-Life model detection
+                for (int _hi = 1; _hi <= 99; _hi++)
+                    _hookerModelHashes.Add(Function.Call<int>(Hash.GET_HASH_KEY, string.Format("s_f_y_hooker_{0:D2}", _hi)));
+                WriteStartupStatus("ACTIVE");
+                GTA.UI.Notification.Show("CinnamonCoffee " + SCRIPT_VERSION + " active");
+            }
+            catch (Exception exception)
+            {
+                // Constructor failure must not keep a ghost owner alive or invoke
+                // gameplay cleanup for an interaction that never started.
+                Tick -= OnTick;
+                KeyDown -= OnKeyDown;
+                KeyUp -= OnKeyUp;
+                Aborted -= OnAborted;
+                WriteStartupStatus("STARTUP FAILED (" + exception.GetType().Name + ")");
+                try { _waveMixer.Dispose(); } catch { }
+                try { if (_telemetry != null) _telemetry.Dispose(); } catch { }
+                try { _instanceLease.Dispose(); } catch { }
+                _instanceLease = null;
+                throw;
+            }
+        }
+
+        private void WriteStartupStatus(string status)
+        {
+            try
+            {
+                File.AppendAllText("scripts\\CinnamonCoffeeStartup.log", DateTime.UtcNow.ToString("o")
+                    + " version=" + SCRIPT_VERSION + " " + status + " file=" + Filename + Environment.NewLine);
+            }
+            catch { }
         }
 
         private void OnAborted(object sender, EventArgs e)
         {
-            // Script reload / unload — clear animations and clean up so nothing is left stuck
-            try { FullReset(); } catch { }
-            try { _waveMixer.Dispose(); } catch { }
-            // Explicitly clear the player's task so the animation stops immediately
+            CinnamonCoffeeInstanceLease ownedLease = _instanceLease;
+            if (ownedLease == null) return;
+            _instanceLease = null;
             try
             {
-                Ped player = Game.Player.Character;
-                if (player != null && player.Exists())
+                // Only the active owner may clean up gameplay state on reload.
+                try { FullReset(); } catch { }
+                try { _waveMixer.Dispose(); } catch { }
+                try
                 {
-                    player.Task.ClearAll();
-                    player.IsPositionFrozen = false;
-                    Function.Call(Hash.SET_ENTITY_COLLISION, player, true, true);
+                    Ped player = Game.Player.Character;
+                    if (player != null && player.Exists())
+                    {
+                        player.Task.ClearAll();
+                        player.IsPositionFrozen = false;
+                        Function.Call(Hash.SET_ENTITY_COLLISION, player, true, true);
+                    }
                 }
+                catch { }
             }
-            catch { }
+            finally
+            {
+                try { if (_telemetry != null) _telemetry.Dispose(); } catch { }
+                ownedLease.Dispose();
+            }
         }
 
         // ════════════
@@ -5861,17 +5909,14 @@ namespace CinnamonCoffee
         {
             DrawSectionHeader("PARTNER VOICE - FIX " + VOICE_FIX_VERSION, x, ref y);
             PartnerVoiceEntry selected = _partnerVoices.Find(v => v.Name == partnerVoice);
-            DrawMenuText("Selected: " + (selected == null ? "AUTOMATIC" : selected.Label),
-                x + 0.007f, y, 0.202f, 0.25f, false, 220, 220, 220, 255);
-            y += lh;
+            DrawMenuInfo("Selected: " + (selected == null ? "AUTOMATIC" : selected.Label),
+                x, ref y, lh, 0.25f, 220, 220, 220);
             PartnerVoiceEntry active = _partnerVoices.Find(v => v.Name == _appliedPartnerVoice);
-            DrawMenuText("Speech bank: " + (active == null ? "AUTOMATIC" : active.Label),
-                x + 0.007f, y, 0.202f, 0.23f, false, 170, 230, 170, 255);
-            y += lh;
+            DrawMenuInfo("Speech bank: " + (active == null ? "AUTOMATIC" : active.Label),
+                x, ref y, lh, 0.23f, 170, 230, 170);
             if (_pendingPartnerVoiceChange)
             {
-                DrawMenuText("Waiting for current line to finish...", x + 0.007f, y, 0.202f, 0.23f, false, 255, 220, 120, 255);
-                y += lh;
+                DrawMenuInfo("Waiting for current line to finish...", x, ref y, lh, 0.23f, 255, 220, 120);
             }
             DrawMenuItem("Automatic (mod default)" + (partnerVoice.Length == 0 ? " ~g~[x]" : ""), 0, x, ref y, lh);
             DrawMenuItem("Preview selected voice", 1, x, ref y, lh);
@@ -5909,6 +5954,12 @@ namespace CinnamonCoffee
         {
             return partnerSpeechGapSeconds < 0d ? "Random 2-5 s"
                 : partnerSpeechGapSeconds.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture) + " s";
+        }
+
+        private int GetPartnerSpeechQuietMilliseconds()
+        {
+            return partnerSpeechGapSeconds < 0d ? SPEECH_END_QUIET_MS
+                : Math.Min(SPEECH_END_QUIET_MS, GetPartnerSpeechGapMilliseconds());
         }
 
         private int GetPartnerSpeechGapMilliseconds()
@@ -5975,7 +6026,7 @@ namespace CinnamonCoffee
         // END SPEECH GAP SETTINGS
 
         // PARTNER AUDIO SCHEDULER
-        private const string SCRIPT_VERSION = "1.4";
+        private const string SCRIPT_VERSION = "1.5";
         private const string VOICE_FIX_VERSION = SCRIPT_VERSION;
         private const int SPEECH_LAUNCH_GRACE_MS = 1200;
         private const int SPEECH_END_QUIET_MS = 450;
@@ -5985,6 +6036,8 @@ namespace CinnamonCoffee
         private int _speechStartFailures = 0;
         private int _lastSpeechDiagnosticAt = -10000;
         private string _lastSpeechName = "";
+        private int _speechAcknowledgedAt, _speechExpectedStartAt;
+        private bool _speechCheckFixedGap;
         private bool _directorModeAudioActive = false;
         private int _voiceReadbackAttempts = 0;
         private bool _voiceReadbackConfirmed = false;
@@ -6029,6 +6082,7 @@ namespace CinnamonCoffee
                     _speechStartFailures = 0;
                     _speechObservedActive = true;
                     _speechQuietStarted = false;
+                    RecordPartnerSpeechAcknowledged(now);
                 }
                 else if (unchecked(now - _speechLaunchAt) < SPEECH_LAUNCH_GRACE_MS) return true;
                 else
@@ -6036,12 +6090,7 @@ namespace CinnamonCoffee
                     // A void native request can be declined. Retry promptly; no fake speech-end gap.
                     _speechRequestPending = false;
                     _speechStartFailures++;
-                    if (_speechStartFailures >= 3 && unchecked(now - _lastSpeechDiagnosticAt) >= 10000)
-                    {
-                        _lastSpeechDiagnosticAt = now;
-                        try { File.AppendAllText("scripts\\CinnamonCoffeeAudio.log", DateTime.UtcNow.ToString("o")
-                            + " speech start not acknowledged; bank=" + partnerVoice + "; event=" + _lastSpeechName + Environment.NewLine); } catch { }
-                    }
+                    LogPartnerSpeechTiming("start not acknowledged", now);
                     // Retain the last request identity briefly: an engine start can arrive after timeout.
                     SchedulePartnerLoopSpeech(now, 750);
                     return false;
@@ -6052,8 +6101,12 @@ namespace CinnamonCoffee
             {
                 _speechObservedActive = true; // Adopt a late acknowledgement of our recent request.
                 _speechQuietStarted = false;
+                RecordPartnerSpeechAcknowledged(now);
             }
             if (!_speechObservedActive) return playing; // Background speech does not move our deadline.
+            // Only an acknowledged owned line may use scripted speech as a second busy signal.
+            // This cannot acknowledge an unstarted request or adopt unrelated engine chatter.
+            playing = playing || Function.Call<bool>((Hash)0xCC9AA18DCC7084F4UL, ped);
             if (playing)
             {
                 _speechQuietStarted = false;
@@ -6065,7 +6118,9 @@ namespace CinnamonCoffee
                 _speechQuietSince = now;
                 return true;
             }
-            if (unchecked(now - _speechQuietSince) < SPEECH_END_QUIET_MS) return true;
+            // Fixed short gaps must not inherit a hidden 450 ms minimum. Multiple busy
+            // queries in one tick are not distinct observations, including when gap is zero.
+            if (now == _speechQuietSince || unchecked(now - _speechQuietSince) < GetPartnerSpeechQuietMilliseconds()) return true;
             _speechObservedActive = false;
             _speechQuietStarted = false;
             _speechLaunchPedHandle = 0;
@@ -6074,6 +6129,30 @@ namespace CinnamonCoffee
             _hasPartnerSpeechEnded = true;
             SchedulePartnerLoopSpeech(_speechQuietSince, GetPartnerSpeechGapMilliseconds());
             return false;
+        }
+
+        private void RecordPartnerSpeechAcknowledged(int now)
+        {
+            _speechAcknowledgedAt = now;
+            if (_speechCheckFixedGap && Math.Abs((long)unchecked(now - _speechExpectedStartAt)) > 250L)
+                LogPartnerSpeechTiming("fixed-gap start deviation", now);
+        }
+
+        private void LogPartnerSpeechTiming(string reason, int now)
+        {
+            if (unchecked(now - _lastSpeechDiagnosticAt) < 10000) return;
+            _lastSpeechDiagnosticAt = now;
+            try
+            {
+                File.AppendAllText("scripts\\CinnamonCoffeeAudio.log", DateTime.UtcNow.ToString("o")
+                    + " v=" + SCRIPT_VERSION + " " + reason
+                    + "; gapSeconds=" + partnerSpeechGapSeconds.ToString("R", System.Globalization.CultureInfo.InvariantCulture)
+                    + "; lastEnd=" + _lastPartnerSpeechEndedAt + "; expected=" + _speechExpectedStartAt
+                    + "; requested=" + _speechLaunchAt + "; acknowledged=" + _speechAcknowledgedAt
+                    + "; observed=" + now + "; failures=" + _speechStartFailures
+                    + "; bank=" + partnerVoice + "; event=" + _lastSpeechName + Environment.NewLine);
+            }
+            catch { }
         }
 
         private bool HasQueuedPartnerSpeech()
@@ -6240,6 +6319,9 @@ namespace CinnamonCoffee
             _speechRequestPending = false;
             _speechStartFailures = 0;
             _lastSpeechName = "";
+            _speechAcknowledgedAt = 0;
+            _speechExpectedStartAt = 0;
+            _speechCheckFixedGap = false;
             _speechQuietStarted = false;
             _nextPartnerLoopSpeechAt = 0;
             _partnerLoopDeadlineSet = false;
@@ -7107,6 +7189,18 @@ namespace CinnamonCoffee
         // ═════════
         // KEY INPUT
         // ═════════
+        // KEYBOARD MASTER INPUT
+        private bool _keyboardMasterWasDown;
+        private bool _keyboardMasterPressedThisTick;
+
+        private void SampleKeyboardMasterInput()
+        {
+            bool held = Game.IsKeyPressed(masterKey);
+            _keyboardMasterPressedThisTick = held && !_keyboardMasterWasDown;
+            _keyboardMasterWasDown = held;
+        }
+        // END KEYBOARD MASTER INPUT
+
         private void OnKeyDown(object sender, KeyEventArgs e)
         {
             if (tokenKeyboardOpen || _speechGapKeyboardOpen || _speechGapInputFrame) return;
@@ -7116,9 +7210,9 @@ namespace CinnamonCoffee
             if ((_clubPhase != ClubDancePhase.Off || menuLevel == MenuLevel.Club) && e.KeyCode == masterKey) return;
             if (_liveVoiceMenu && (e.KeyCode == menuBackKey || e.KeyCode == masterKey))
             { CloseLiveVoiceMenu(); return; }
-            // Animation master input is handled once in the tick; OS key-repeat must not
-            // run the general menu-close/proposition-exit handler while both peds animate.
-            if (state == ScriptState.Animating && e.KeyCode == masterKey) return;
+            // The tick owns master input in every core state. Repeated KeyDown events
+            // must not close a menu in addition to the sampled physical press.
+            if (e.KeyCode == masterKey) return;
             if (menuLevel == MenuLevel.None) return;
 
             int itemCount = GetCurrentMenuItemCount();
@@ -7354,21 +7448,7 @@ namespace CinnamonCoffee
                     keyCooldown = KEY_COOLDOWN_FRAMES;
                 }
             }
-            else if (e.KeyCode == masterKey)
-            {
-                // Exit car proposition pose if active
-                if (mode == Mode.Car && carPropActive)
-                    ExitCarProposition(Game.Player.Character);
-                if (_streetSitPropActive && _streetSitPropPhase <= 2 && state != ScriptState.Animating)
-                    ExitStreetSitProposition(Game.Player.Character);
-                // Master key always fully closes the menu — don't reopen anything after exit anim
-                _carPropPendingMenu      = MenuLevel.None;
-                _carPropExitReturnMenu   = MenuLevel.None;
-                _streetSitExitReturnMenu = MenuLevel.None;
-                _streetSitExitReturnIdx  = 0;
-                menuLevel = MenuLevel.None;
-                keyCooldown = KEY_COOLDOWN_FRAMES;
-            }
+
         }
 
         // ═══════════════════════
@@ -10359,6 +10439,9 @@ namespace CinnamonCoffee
         // ═════════
         private void OnTick(object sender, EventArgs e)
         {
+            // Sample even when a module owns/returns from this frame, so a held J
+            // cannot become a new press when control returns to the core state.
+            SampleKeyboardMasterInput();
             _telemetry.Poll(); // drain pong datagrams on the game thread (non-blocking)
             TickCustomSound();
             _speechGapInputFrame = _speechGapKeyboardOpen;
@@ -11288,15 +11371,21 @@ namespace CinnamonCoffee
             // ── Master key: open/close menu ──
             bool masterTriggered = _usingController
                 ? (Function.Call<bool>(Hash.IS_DISABLED_CONTROL_PRESSED, 0, masterControlModifier) && Function.Call<bool>(Hash.IS_DISABLED_CONTROL_JUST_PRESSED, 0, masterControl))
-                : Game.IsKeyPressed(masterKey);
+                : _keyboardMasterPressedThisTick;
             if (masterTriggered && !_speechGapKeyboardOpen && !_speechGapInputFrame && keyCooldown == 0)
             {
                 keyCooldown = KEY_COOLDOWN_FRAMES;
                 if (menuLevel != MenuLevel.None)
                 {
-                    // Close the menu — also trigger street sit exit if applicable
+                    // Preserve the idle close cleanup, with a single input owner.
+                    if (mode == Mode.Car && carPropActive)
+                        ExitCarProposition(Game.Player.Character);
                     if (_streetSitPropActive && _streetSitPropPhase <= 2 && state != ScriptState.Animating)
                         ExitStreetSitProposition(Game.Player.Character);
+                    _carPropPendingMenu = MenuLevel.None;
+                    _carPropExitReturnMenu = MenuLevel.None;
+                    _streetSitExitReturnMenu = MenuLevel.None;
+                    _streetSitExitReturnIdx = 0;
                     menuLevel = MenuLevel.None;
                 }
                 else if (_streetSitPropActive && (_streetSitPropPhase < 2 || _streetSitPropPhase >= 3))
@@ -11629,11 +11718,11 @@ namespace CinnamonCoffee
 
             // Animation speed controls request cadence, never the duration of a speech line.
             int now = Game.GameTime;
-            if (currentAction != "" && animPhase == 2 && animSpeed > 0f && IsPartnerLoopSpeechDue()
-                && !IsPartnerSpeechBusy(girl) && !_pendingPartnerVoiceChange && !HasQueuedPartnerSpeech())
+            if (currentAction != "" && animPhase == 2 && animSpeed > 0f && !IsPartnerSpeechBusy(girl)
+                && IsPartnerLoopSpeechDue() && !_pendingPartnerVoiceChange && !HasQueuedPartnerSpeech())
             {
                 if (PlayMoaningSounds()) lastVoiceTime = now;
-                // Completion schedules the next 2–5 second gap; WAV playback cannot starve this request.
+                // Completion schedules the configured gap; WAV playback cannot starve this request.
             }
 
             // Custom BJ sounds — separate, faster timer (runs alongside GTA speech)
@@ -12433,7 +12522,7 @@ namespace CinnamonCoffee
             // The live voice overlay consumes its close button without finishing the animation.
             bool masterTriggered = _usingController
                 ? (Function.Call<bool>(Hash.IS_DISABLED_CONTROL_PRESSED, 0, masterControlModifier) && Function.Call<bool>(Hash.IS_DISABLED_CONTROL_JUST_PRESSED, 0, masterControl))
-                : Game.IsKeyPressed(masterKey);
+                : _keyboardMasterPressedThisTick;
             if (masterTriggered && !_speechGapKeyboardOpen && !_speechGapInputFrame && keyCooldown == 0 && !_liveVoiceMenu && !_suppressFinishUntilMasterReleased)
                 HandleAnimationMasterMenu();
 
@@ -17498,12 +17587,19 @@ namespace CinnamonCoffee
             if (girl != null && ped.Handle == girl.Handle) AssignHookerVoice(ped);
             EnsurePartnerDirectorAudio();
             string voice = !string.IsNullOrEmpty(partnerVoice) ? partnerVoice : _girlCurrentVoice;
+            // Ordinary loop requests should not inherit GTA's discretionary ambient cooldown.
+            // Force only after the busy guard; never use INTERRUPT or stop a playing line.
+            string speechParam = IsLoopSpeech(speechName) ? "SPEECH_PARAMS_FORCE_NORMAL" : "SPEECH_PARAMS_ALLOW_REPEAT";
             if (!string.IsNullOrEmpty(voice))
-                Function.Call((Hash)0x3523634255FC3318L, ped, speechName, voice, "SPEECH_PARAMS_ALLOW_REPEAT", 0);
+                Function.Call((Hash)0x3523634255FC3318L, ped, speechName, voice, speechParam, 0);
             else
-                Function.Call(Hash.PLAY_PED_AMBIENT_SPEECH_NATIVE, ped, speechName, "SPEECH_PARAMS_ALLOW_REPEAT", 0);
+                Function.Call(Hash.PLAY_PED_AMBIENT_SPEECH_NATIVE, ped, speechName, speechParam);
             _speechLaunchPedHandle = ped.Handle;
             _speechLaunchAt = Game.GameTime;
+            _speechAcknowledgedAt = 0;
+            _speechCheckFixedGap = IsLoopSpeech(speechName) && partnerSpeechGapSeconds >= 0d && _hasPartnerSpeechEnded;
+            _speechExpectedStartAt = _speechCheckFixedGap
+                ? unchecked(_lastPartnerSpeechEndedAt + GetPartnerSpeechGapMilliseconds()) : Game.GameTime;
             _speechObservedPedHandle = ped.Handle;
             _speechRequestPending = true;
             _lastSpeechName = speechName;
@@ -18698,18 +18794,71 @@ namespace CinnamonCoffee
         }
 
         /// <summary>Draw the selection menu on screen.</summary>
+        private int _lastMenuDrawFrame = -1;
+        private int _lastAnimationHudFrame = -1;
+        private float _animationHudTop = 1f;
+        private const Hash BeginMenuLineCount = (Hash)0x521FB041D93DD0E4UL;
+        private const Hash EndMenuLineCount = (Hash)0x9040DFB09BE75706UL;
+        private const Hash MenuCharacterHeight = (Hash)0xDB88A37483346780UL;
+
+        private void ConfigureMenuText(float x, float w, float scale, bool centered, int font)
+        {
+            Function.Call(Hash.SET_TEXT_FONT, font);
+            Function.Call(Hash.SET_TEXT_SCALE, scale, scale);
+            Function.Call(Hash.SET_TEXT_PROPORTIONAL, true);
+            Function.Call(Hash.SET_TEXT_LEADING, 0);
+            Function.Call(Hash.SET_TEXT_RIGHT_JUSTIFY, false);
+            Function.Call(Hash.SET_TEXT_JUSTIFICATION, centered ? 0 : 1);
+            Function.Call(Hash.SET_TEXT_CENTRE, centered);
+            Function.Call(Hash.SET_TEXT_WRAP, x, x + w);
+        }
+
+        private void AddMenuTextComponents(string text)
+        {
+            text = text ?? "";
+            for (int i = 0; i < text.Length; i += 99)
+                Function.Call(Hash.ADD_TEXT_COMPONENT_SUBSTRING_PLAYER_NAME, text.Substring(i, Math.Min(99, text.Length - i)));
+        }
+
+        private float MeasureMenuTextHeight(string text, float x, float y, float w, float scale, bool centered, int font)
+        {
+            ConfigureMenuText(x, w, scale, centered, font);
+            Function.Call(BeginMenuLineCount, "STRING");
+            AddMenuTextComponents(text);
+            int lines = Math.Max(1, Function.Call<int>(EndMenuLineCount, centered ? x + w * 0.5f : x, y));
+            float height = Function.Call<float>(MenuCharacterHeight, scale, font);
+            return lines * Math.Max(0.001f, height);
+        }
+
+        private void DrawMenuInfo(string text, float x, ref float y, float lh, float scale, int r, int g, int b)
+        {
+            const float PAD = 0.007f, WIDTH = 0.202f;
+            float height = MeasureMenuTextHeight(text, x + PAD, y, WIDTH, scale, false, 0);
+            DrawMenuText(text, x + PAD, y, WIDTH, scale, false, r, g, b, 255);
+            y += Math.Max(lh, height + 0.005f);
+        }
+
         private void DrawAnimationControls(string speedDisplay)
         {
+            if (menuLevel != MenuLevel.None || _lastAnimationHudFrame == Game.FrameCount) return;
             string voiceShortcut = _usingController ? masterControlModifierDisplay + "+~INPUT_FRONTEND_Y~" : "F6";
-            string actionHint = _liveVoiceMenu ? "CLOSE VOICE MENU" : menuLevel == MenuLevel.Finish ? "CLOSE FINISH MENU" : "FINISH MENU";
-            DrawTextOnScreen("[" + MasterDisplay + "] " + actionHint + "   [" + voiceShortcut + "] PARTNER VOICE",
-                0.5f, 0.925f, 0.30f, true);
-            DrawTextOnScreen("[" + SpeedDownDisplay + "/" + SpeedUpDisplay + "] SPEED   [" + SpeedResetDisplay
-                + "] RESET   " + speedDisplay, 0.5f, 0.955f, 0.30f, true);
+            string first = "[" + MasterDisplay + "] FINISH MENU   [" + voiceShortcut + "] PARTNER VOICE";
+            string second = "[" + SpeedDownDisplay + "/" + SpeedUpDisplay + "] SPEED   [" + SpeedResetDisplay + "] RESET   " + speedDisplay;
+            const float SCALE = 0.30f, GAP = 0.008f;
+            float firstHeight = MeasureMenuTextHeight(first, 0f, 0f, 1f, SCALE, true, 0);
+            float secondHeight = MeasureMenuTextHeight(second, 0f, 0f, 1f, SCALE, true, 0);
+            float top = Math.Max(0f, Math.Min(0.925f, 0.985f - firstHeight - GAP - secondHeight));
+            DrawTextOnScreen(first, 0.5f, top, SCALE, true);
+            DrawTextOnScreen(second, 0.5f, top + firstHeight + GAP, SCALE, true);
+            _animationHudTop = top;
+            _lastAnimationHudFrame = Game.FrameCount;
         }
 
         private void DrawMenu()
         {
+            int frame = Game.FrameCount;
+            if (_lastMenuDrawFrame == frame) return;
+            _lastMenuDrawFrame = frame;
             // Clamp menuIndex when dynamic items disappear (e.g. vehicle drives away)
             int maxIdx = GetCurrentMenuItemCount() - 1;
             if (maxIdx < 0) maxIdx = 0;
@@ -18718,9 +18867,11 @@ namespace CinnamonCoffee
             const float PX     = 0.025f;
             const float TOP    = 0.045f;
             const float W      = 0.216f;
-            const float HDR_H  = 0.047f;
             const float PAD    = 0.007f;
             const float LH     = 0.034f;
+            string title = "CINNAMON COFFEE " + SCRIPT_VERSION;
+            float titleHeight = MeasureMenuTextHeight(title, PX + PAD, TOP, W - PAD * 2f, 0.38f, true, 7);
+            float HDR_H = Math.Max(0.047f, titleHeight + 0.014f);
 
             // Measure layout without submitting native draw calls, then render once.
             float yMeasure = TOP + HDR_H + 0.016f;
@@ -18730,7 +18881,15 @@ namespace CinnamonCoffee
 
             bool showSwipe = IsInServiceSubMenu() && !sandboxMode;
             bool showAmt   = menuLevel == MenuLevel.GiveMoney;
-            float FOOT_H   = (showSwipe || showAmt) ? 0.042f : 0.029f;
+            string footLine = "[" + MenuUpDisplay + "/" + MenuDownDisplay + "] Move  ["
+                            + MenuSelectDisplay + "] Select  [" + MenuBackDisplay + "] Back  ["
+                            + MasterDisplay + "] Close";
+            if (showSwipe)
+                footLine += "\n[" + SpeedDownDisplay + "/" + SpeedUpDisplay + "] Swipe";
+            else if (showAmt)
+                footLine += "\n[" + SpeedDownDisplay + "/" + SpeedUpDisplay + "] Amt";
+            float FOOT_H = Math.Max(0.029f,
+                MeasureMenuTextHeight(footLine, PX + PAD, yMeasure, W - PAD * 2f, 0.19f, false, 0) + 0.012f);
 
             float footY   = yMeasure;
             float totalH  = (footY + FOOT_H) - TOP;
@@ -18740,8 +18899,8 @@ namespace CinnamonCoffee
             DrawMenuRect(PX, TOP, W, HDR_H, 79, 38, 142, 230);
 
             // ── Header title "CINNAMON COFFEE" — vertically centered in the header bar ──
-            float hdrTextY = TOP + (HDR_H * 0.5f) - 0.014f;
-            DrawMenuText("CINNAMON COFFEE 1.4", PX + PAD, hdrTextY, W - PAD * 2f, 0.38f, true, 210, 125, 45, 255, 7);
+            float hdrTextY = TOP + (HDR_H - titleHeight) * 0.5f;
+            DrawMenuText(title, PX + PAD, hdrTextY, W - PAD * 2f, 0.38f, true, 210, 125, 45, 255, 7);
 
             // ── Pass 3: redraw items on top of background ────────────────────────
             float y = TOP + HDR_H + 0.016f;
@@ -18749,13 +18908,6 @@ namespace CinnamonCoffee
 
             // ── Dark footer bar ────────────────────────────────────────────────────
             DrawMenuRect(PX, footY, W, FOOT_H, 30, 30, 30, 210);
-            string footLine = "[" + MenuUpDisplay + "/" + MenuDownDisplay + "] Move  ["
-                            + MenuSelectDisplay + "] Select  [" + MenuBackDisplay + "] Back  ["
-                            + MasterDisplay + "] Close";
-            if (showSwipe)
-                footLine += "\n[" + SpeedDownDisplay + "/" + SpeedUpDisplay + "] Swipe";
-            else if (showAmt)
-                footLine += "\n[" + SpeedDownDisplay + "/" + SpeedUpDisplay + "] Amt";
             DrawMenuText(footLine, PX + PAD, footY + 0.006f, W - PAD * 2f, 0.19f, false, 200, 200, 200, 255);
         }
 
@@ -19875,9 +20027,9 @@ namespace CinnamonCoffee
         private void DrawSectionHeader(string title, float x, ref float y)
         {
             const float W = 0.216f;
-            const float H = 0.027f;
+            float height = Math.Max(0.027f, MeasureMenuTextHeight(title, x, y + 0.005f, W, 0.27f, true, 0) + 0.005f);
             DrawMenuText(title, x, y + 0.005f, W, 0.27f, true, 255, 210, 0, 255);
-            y += H + 0.016f;
+            y += height + 0.016f;
         }
 
         private void DrawMenuRect(float x, float y, float w, float h, int r, int g, int b, int a)
@@ -19894,18 +20046,12 @@ namespace CinnamonCoffee
         private void DrawMenuText(string text, float x, float y, float w, float scale, bool centered, int r, int g, int b, int a, int font)
         {
             if (_measuringMenu) return;
-            Function.Call(Hash.SET_TEXT_FONT, font);
-            Function.Call(Hash.SET_TEXT_SCALE, scale, scale);
+            ConfigureMenuText(x, w, scale, centered, font);
             Function.Call(Hash.SET_TEXT_COLOUR, r, g, b, a);
-            Function.Call(Hash.SET_TEXT_WRAP, x, x + w);
-            Function.Call(Hash.SET_TEXT_CENTRE, centered);
             Function.Call(Hash.SET_TEXT_DROPSHADOW, 2, 2, 0, 0, 0);
             Function.Call(Hash.BEGIN_TEXT_COMMAND_DISPLAY_TEXT, "STRING");
-            for (int i = 0; i < text.Length; i += 99)
-                Function.Call(Hash.ADD_TEXT_COMPONENT_SUBSTRING_PLAYER_NAME, text.Substring(i, Math.Min(99, text.Length - i)));
-            // When centered, GTA centers around the x passed here — use the mid-point of the wrap range
-            float drawX = centered ? x + w * 0.5f : x;
-            Function.Call(Hash.END_TEXT_COMMAND_DISPLAY_TEXT, drawX, y, 0);
+            AddMenuTextComponents(text);
+            Function.Call(Hash.END_TEXT_COMMAND_DISPLAY_TEXT, centered ? x + w * 0.5f : x, y, 0);
         }
 
         private void DrawMenuItem(string text, int itemIdx, float x, ref float y, float lh)
@@ -19915,94 +20061,56 @@ namespace CinnamonCoffee
 
         private void DrawMenuItem(string text, int itemIdx, float x, ref float y, float lh, float scale)
         {
-            // constants matching JewsStrike panel layout
-            const float W    = 0.216f;
-            const float PAD  = 0.007f;
-            const float ITEM_H = 0.034f;
-
+            const float W = 0.216f, PAD = 0.007f;
+            float height = Math.Max(lh,
+                MeasureMenuTextHeight(text, x + PAD, y + 0.005f, W - PAD * 2f, scale, false, 0) + 0.010f);
             if (itemIdx == menuIndex)
-                DrawMenuRect(x, y, W, ITEM_H, 79, 38, 142, 210);   // purple highlight
-
+                DrawMenuRect(x, y, W, height, 79, 38, 142, 210);
             DrawMenuText(text, x + PAD, y + 0.005f, W - PAD * 2f, scale, false, 255, 255, 255, 255);
-            y += lh;
+            y += height;
         }
 
         private void DrawMenuItemCentered(string text, int itemIdx, float x, ref float y, float lh, float scale = 0.31f)
         {
-            const float W          = 0.216f;
-            const float PAD        = 0.007f;
-            const float ITEM_H     = 0.034f;
-            const float BASE_SCALE = 0.31f;
-            const float BASE_YOFF  = 0.005f;
-            // Vertically center smaller text: as scale shrinks, push text down proportionally
-            float textH  = scale / BASE_SCALE * (ITEM_H - BASE_YOFF * 2f);
-            float yOff   = (ITEM_H - textH) / 2f;
-
+            const float W = 0.216f, PAD = 0.007f;
+            float textHeight = MeasureMenuTextHeight(text, x + PAD, y + 0.005f, W - PAD * 2f, scale, true, 0);
+            float height = Math.Max(lh, textHeight + 0.010f);
             if (itemIdx == menuIndex)
-                DrawMenuRect(x, y, W, ITEM_H, 79, 38, 142, 210);
-
-            DrawMenuText(text, x + PAD, y + yOff, W - PAD * 2f, scale, false, 255, 255, 255, 255);
-            y += lh;
+                DrawMenuRect(x, y, W, height, 79, 38, 142, 210);
+            DrawMenuText(text, x + PAD, y + (height - textHeight) * 0.5f,
+                W - PAD * 2f, scale, true, 255, 255, 255, 255);
+            y += height;
         }
 
         /// <summary>Like DrawMenuItem but scales the row height to fit wrapped text.</summary>
         private void DrawMenuItemWrapped(string text, int itemIdx, float x, ref float y, float lh, float scale = 0.31f)
         {
-            const float W   = 0.216f;
-            const float PAD = 0.007f;
-            // Strip GTA color codes (~x~) for length estimation
-            string plain = System.Text.RegularExpressions.Regex.Replace(text, "~[^~]+~", "");
-            // At scale 0.31 inside W=0.202, roughly 36 chars fit per line (scale * 0.018 per char)
-            int charsPerLine = (int)(0.202f / (scale * 0.016f));
-            if (charsPerLine < 1) charsPerLine = 1;
-            int lines = (plain.Length + charsPerLine - 1) / charsPerLine;
-            if (lines < 1) lines = 1;
-            float rowH = lh * lines;
-
-            if (itemIdx == menuIndex)
-                DrawMenuRect(x, y, W, rowH, 79, 38, 142, 210);
-
-            DrawMenuText(text, x + PAD, y + 0.005f, W - PAD * 2f, scale, false, 255, 255, 255, 255);
-            y += rowH;
+            DrawMenuItem(text, itemIdx, x, ref y, lh, scale);
         }
 
         /// <summary>Draw text on screen using GTA V natives.</summary>
         private void DrawTextOnScreen(string text, float x, float y)
         {
-            if (_measuringMenu) return;
-            Function.Call(Hash.SET_TEXT_FONT, 0);
-            Function.Call(Hash.SET_TEXT_SCALE, 0.4f, 0.4f);
-            Function.Call(Hash.SET_TEXT_COLOUR, 255, 255, 255, 255);
-            Function.Call(Hash.SET_TEXT_WRAP, 0.0f, 1.0f);
-            Function.Call(Hash.SET_TEXT_CENTRE, false);
-            Function.Call(Hash.SET_TEXT_DROPSHADOW, 2, 2, 0, 0, 0);
-            Function.Call(Hash.SET_TEXT_EDGE, 1, 0, 0, 0, 205);
-            Function.Call(Hash.BEGIN_TEXT_COMMAND_DISPLAY_TEXT, "STRING");
-            // Split into 99-char chunks to avoid native string limit
-            for (int i = 0; i < text.Length; i += 99)
-            {
-                string chunk = text.Substring(i, Math.Min(99, text.Length - i));
-                Function.Call(Hash.ADD_TEXT_COMPONENT_SUBSTRING_PLAYER_NAME, chunk);
-            }
-            Function.Call(Hash.END_TEXT_COMMAND_DISPLAY_TEXT, x, y, 0);
+            DrawTextOnScreen(text, x, y, 0.4f, false);
         }
 
         private void DrawTextOnScreen(string text, float x, float y, float scale, bool centered)
         {
             if (_measuringMenu) return;
-            Function.Call(Hash.SET_TEXT_FONT, 0);
-            Function.Call(Hash.SET_TEXT_SCALE, scale, scale);
+            // Long status messages use the space beside an open panel, not the panel itself.
+            float left = centered && menuLevel != MenuLevel.None ? 0.265f : 0f;
+            float right = centered && menuLevel != MenuLevel.None ? 0.985f : 1f;
+            if (centered) x = (left + right) * 0.5f;
+            float height = MeasureMenuTextHeight(text, left, y, right - left, scale, centered, 0);
+            y = Math.Min(y, Math.Max(0f, 0.985f - height));
+            if (centered && menuLevel == MenuLevel.None && _lastAnimationHudFrame == Game.FrameCount)
+                y = Math.Min(y, Math.Max(0f, _animationHudTop - height - 0.012f));
+            ConfigureMenuText(left, right - left, scale, centered, 0);
             Function.Call(Hash.SET_TEXT_COLOUR, 255, 255, 255, 255);
-            Function.Call(Hash.SET_TEXT_WRAP, 0.0f, 1.0f);
-            Function.Call(Hash.SET_TEXT_CENTRE, centered);
             Function.Call(Hash.SET_TEXT_DROPSHADOW, 2, 2, 0, 0, 0);
             Function.Call(Hash.SET_TEXT_EDGE, 1, 0, 0, 0, 205);
             Function.Call(Hash.BEGIN_TEXT_COMMAND_DISPLAY_TEXT, "STRING");
-            for (int i = 0; i < text.Length; i += 99)
-            {
-                string chunk = text.Substring(i, Math.Min(99, text.Length - i));
-                Function.Call(Hash.ADD_TEXT_COMPONENT_SUBSTRING_PLAYER_NAME, chunk);
-            }
+            AddMenuTextComponents(text);
             Function.Call(Hash.END_TEXT_COMMAND_DISPLAY_TEXT, x, y, 0);
         }
 
@@ -20020,6 +20128,75 @@ namespace CinnamonCoffee
             GTA.UI.Screen.ShowSubtitle(text != null ? text.Replace("\"", "") : text, duration);
         }
     }
+
+    // PROCESS-WIDE CINNAMONCOFFEE INSTANCE LEASE
+    // A static flag is scoped to one compiled assembly/AppDomain and cannot stop
+    // copied .cs files from each creating a second HUD/input/audio owner.
+    internal sealed class CinnamonCoffeeInstanceLease : IDisposable
+    {
+        private System.Threading.Semaphore _semaphore;
+        private FileStream _portableLease;
+
+        private CinnamonCoffeeInstanceLease(System.Threading.Semaphore semaphore, FileStream portableLease)
+        {
+            _semaphore = semaphore;
+            _portableLease = portableLease;
+        }
+
+        public static bool TryAcquire(out CinnamonCoffeeInstanceLease lease)
+        {
+            lease = null;
+            int processId = System.Diagnostics.Process.GetCurrentProcess().Id;
+            System.Threading.Semaphore semaphore = null;
+            try
+            {
+                semaphore = new System.Threading.Semaphore(1, 1, "Local\\CinnamonCoffee.ActiveScript." + processId);
+                if (!semaphore.WaitOne(0))
+                {
+                    semaphore.Dispose();
+                    return false;
+                }
+                lease = new CinnamonCoffeeInstanceLease(semaphore, null);
+                return true;
+            }
+            catch (PlatformNotSupportedException)
+            {
+                // Named semaphores are available on GTA V's Windows runtime.
+                // This equivalent nonblocking lease also permits Linux regression
+                // tests of copies loaded from separately compiled assemblies.
+                if (semaphore != null) semaphore.Dispose();
+                try
+                {
+                    string path = Path.Combine(Path.GetTempPath(), "CinnamonCoffee.ActiveScript." + processId + ".lease");
+                    var stream = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+                    lease = new CinnamonCoffeeInstanceLease(null, stream);
+                    return true;
+                }
+                catch (IOException) { return false; }
+            }
+            catch
+            {
+                if (semaphore != null) semaphore.Dispose();
+                throw;
+            }
+        }
+
+        public void Dispose()
+        {
+            // Semaphore.Release has no mutex thread-affinity requirement. SHVDN
+            // may abort a script on a different thread from its construction.
+            var semaphore = System.Threading.Interlocked.Exchange(ref _semaphore, null);
+            if (semaphore != null)
+            {
+                try { semaphore.Release(); }
+                finally { semaphore.Dispose(); }
+            }
+            var stream = System.Threading.Interlocked.Exchange(ref _portableLease, null);
+            if (stream != null) stream.Dispose();
+        }
+    }
+    // END PROCESS-WIDE CINNAMONCOFFEE INSTANCE LEASE
+
 
     /// <summary>
     /// Fire-and-forget UDP telemetry sender for external device intensity control.

@@ -40,8 +40,18 @@ function Get-ScriptFiles([string] $Root) {
             if ($item.PSIsContainer) {
                 $pending.Enqueue($item.FullName)
             }
-            elseif ($item.Name -match '^CinnamonCoffee.*\.(cs|vb|dll)$') {
-                $item
+            else {
+                $knownName = $item.Name -match '^CinnamonCoffee.*\.(cs|vb|dll)$'
+                $renamedSource = $false
+                if (-not $knownName -and $item.Extension -ieq '.cs') {
+                    # A copy may be renamed "Copy of ..." or "OldMod.cs". Match
+                    # the actual namespace/type declaration, never arbitrary DLLs
+                    # or a mention of the mod in another script's comments.
+                    $text = [IO.File]::ReadAllText($item.FullName)
+                    $renamedSource = ($text -match '(?m)^\s*namespace\s+CinnamonCoffee\b' -and
+                        $text -match '(?m)^\s*(?:public\s+)?(?:(?:sealed|partial)\s+)*class\s+CinnamonCoffee\s*:\s*(?:GTA\.)?Script\b')
+                }
+                if ($knownName -or $renamedSource) { $item }
             }
         }
     }
@@ -113,6 +123,7 @@ if (Test-Path -LiteralPath $scriptsRoot) {
     $oldScripts = @(Get-ScriptFiles $scriptsRoot)
 }
 Write-Host "Package: CinnamonCoffee $version"
+Write-Host "GTA V folder: $gameRoot"
 Write-Host "Source SHA256: $sourceHash"
 Write-Host "Existing CinnamonCoffee script copies: $($oldScripts.Count)"
 if (-not $PSCmdlet.ShouldProcess($gameRoot, 'Back up previous CinnamonCoffee scripts and install one API-v3 copy')) {

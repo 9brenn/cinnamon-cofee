@@ -36,6 +36,7 @@ def method(signature):
 
 
 region = source.split('// STREET FINISH PROTECTION', 1)[1].split('// END STREET FINISH PROTECTION', 1)[0]
+master_input = source.split('// KEYBOARD MASTER INPUT', 1)[1].split('// END KEYBOARD MASTER INPUT', 1)[0]
 version_declaration = re.search(r'private const string SCRIPT_VERSION = [^;]+;', source).group(0)
 master = method('private void HandleAnimationMasterMenu()')
 simple = method('private bool HasSimpleFinishMenu()')
@@ -172,14 +173,14 @@ tests = r'''
     private static void Check(bool value,string text){count++;if(!value)throw new Exception("FAIL: "+text);}
     private static bool Near(float a,float b){return Math.Abs(a-b)<0.0001f;}
     private static Harness New(int index=5){Function.Reset();Game.MasterHeld=false;Game.SelectHeld=false;Game.GameTime=1000;var h=new Harness();h.streetActionIdx=index;h.currentAction=index==0?"kissing":"sex";Game.Player.Character=h.player;return h;}
-    private void Step(bool masterHeld=false){Game.GameTime+=16;Game.Player.Character=player;Game.MasterHeld=masterHeld;Function.MasterPressed=masterHeld&&!Function.MasterHeld;Function.MasterHeld=masterHeld;UpdateFinishSelectionLatch();SceneTick(player);}
+    private void Step(bool masterHeld=false){Game.GameTime+=16;Game.Player.Character=player;Game.MasterHeld=masterHeld;Function.MasterPressed=masterHeld&&!Function.MasterHeld;Function.MasterHeld=masterHeld;SampleKeyboardMasterInput();UpdateFinishSelectionLatch();SceneTick(player);}
     private void Open(bool selectHeld=false){Game.SelectHeld=selectHeld;Function.SelectHeld=selectHeld;Step(true);Game.MasterHeld=false;Function.MasterHeld=false;}
     public static void Main(){
         foreach(int index in new[]{0,1,2,3,4,5,6,7,8,9,10,11}){
             var h=New(index);h.Open();
             Check(h.menuLevel==MenuLevel.Finish&&h.animPhase==2&&!h._finishExecutePending,"production scene opens Finish without finishing action "+index);
             Check(Function.AllDisabled==1&&Function.Enabled.SetEquals(new[]{0,1,2,26,199,200}),"street blocks gameplay but preserves camera/pause "+index);
-            Check(Function.Events.IndexOf("DISABLE_ALL_CONTROL_ACTIONS")<Function.Events.IndexOf("Input:J"),"control shielding precedes J "+index);
+            Check(Function.AllDisabled>0&&h._keyboardMasterPressedThisTick,"production scene shields gameplay before dispatching sampled J "+index);
             Check(h.player.Recoveries==0&&h.girl.Recoveries==0&&Function.Stops==0,"opening never replays/stops intact actors "+index);
             h.Step();h.Step();Check(h.player.Recoveries==0&&h.girl.Recoveries==0,"intact pair retains current tasks "+index);
             h.player.Phase=0.2f;h.girl.Phase=0.4f;h.Step();Vector3 anchor=h.player.Position;
@@ -244,7 +245,7 @@ tests = r'''
 with tempfile.TemporaryDirectory(prefix='cinnamon-street-guard-tests-') as directory:
     temp = Path(directory)
     cs, dll = temp / 'StreetGuardTests.cs', temp / 'StreetGuardTests.dll'
-    cs.write_text(mocks + version_declaration + region + simple + master + close_live + keyboard + controller + select_menu + scene + tests)
+    cs.write_text(mocks + version_declaration + master_input + region + simple + master + close_live + keyboard + controller + select_menu + scene + tests)
     rsp = temp / 'refs.rsp'
     rsp.write_text('\n'.join('/r:' + str(p) for p in refs.glob('*.dll')))
     subprocess.run([str(dotnet), str(sdk), '/nologo', '/target:exe', '/langversion:5', '/nostdlib+',

@@ -21,7 +21,7 @@ def extract(signature):
         end+=1
     return source[start:end]
 gap=source.split('// SPEECH GAP SETTINGS',1)[1].split('// END SPEECH GAP SETTINGS',1)[0]
-methods=extract('private bool IsPartnerSpeechBusy(Ped ped)')+'\n'+extract('private void SaveSettings()')
+methods='\n'.join(extract(signature) for signature in ('private bool IsPartnerSpeechBusy(Ped ped)','private void RecordPartnerSpeechAcknowledged(int now)','private void LogPartnerSpeechTiming(string reason, int now)','private void SaveSettings()'))
 load_branch=extract('else if (trimmed.StartsWith("partnerSpeechGapSeconds="))').removeprefix('else ')
 load_helper='private void LoadGapFromText(string text) { foreach(string line in text.Split(\'\\n\')) { string trimmed=line.Trim(); '+load_branch+' } }'
 periodic='private void TickPeriodic() {'+source.split('// Animation speed controls request cadence, never the duration of a speech line.',1)[1].split('// Custom BJ sounds',1)[0]+'}'
@@ -53,6 +53,7 @@ static class Function {
     public static T Call<T>(Hash native,params object[] args){object result;
         if(native==Hash.UPDATE_ONSCREEN_KEYBOARD)result=KeyboardStatus;
         else if(native==Hash.GET_ONSCREEN_KEYBOARD_RESULT)result=KeyboardResult;
+        else if((ulong)native==0xCC9AA18DCC7084F4UL)result=false;
         else if((ulong)native==0x9072C8B49907BFADUL)result=Game.GameTime<((Ped)args[0]).SpeakingUntil;
         else throw new Exception("unexpected native read");
         return (T)result;
@@ -64,7 +65,7 @@ class Harness {
     private const int SPEECH_LAUNCH_GRACE_MS=1200,SPEECH_END_QUIET_MS=450,KEY_COOLDOWN_FRAMES=20;
     private int _nextPartnerLoopSpeechAt,_speechObservedPedHandle,_speechLaunchAt,_speechLaunchPedHandle,_speechQuietSince,_speechStartFailures,_lastSpeechDiagnosticAt;
     private bool _speechObservedActive,_speechRequestPending,_speechQuietStarted;
-    private string _lastSpeechName="GENERIC_HI";
+    private string _lastSpeechName="GENERIC_HI";private const string SCRIPT_VERSION="test";private int _speechAcknowledgedAt,_speechExpectedStartAt;private bool _speechCheckFixedGap;
     private Ped girl=new Ped();private CountingRandom rng=new CountingRandom();
     private bool tokenKeyboardOpen,_suppressFinishUntilMasterReleased;private int keyCooldown,_menuControlCooldown;
     private string hud;
@@ -108,7 +109,7 @@ tests=r'''
         var lines=new List<string>{"// no gap yet","unrelated=yes"};StoreSpeechGapSetting(lines,0d);Check(lines.Count==3&&lines[2]=="partnerSpeechGapSeconds=0","missing setting is appended once");
         h=New();h.partnerSpeechGapSeconds=0.0005d;Check(h.GetPartnerSpeechGapMilliseconds()==1,"half millisecond rounds away from zero");
         h.partnerSpeechGapSeconds=2147483d;Check(h.GetPartnerSpeechGapMilliseconds()==2147483000,"maximum allowed seconds fits millisecond integer");
-        foreach(var setting in new[]{new[]{0d,6450d},new[]{1d,7000d},new[]{3d,9000d},new[]{0.5d,6500d}}){
+        foreach(var setting in new[]{new[]{0d,6050d},new[]{0.1d,6100d},new[]{0.25d,6250d},new[]{0.5d,6500d},new[]{0.75d,6750d},new[]{1d,7000d},new[]{3d,9000d}}){
             h=New();h.partnerSpeechGapSeconds=setting[0];h._speechObservedPedHandle=42;h._speechObservedActive=true;h.girl.SpeakingUntil=6000;
             Run(h,1000,5950);Check(h.Launches.Count==0,"setting cannot cut full active line "+setting[0]);
             Run(h,6000,(int)setting[1]-50);Check(h.Launches.Count==0,"no request before configured delay and quiet guard "+setting[0]);

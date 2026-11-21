@@ -62,13 +62,16 @@ with tempfile.TemporaryDirectory(prefix='cinnamon-installer-') as directory:
         'scripts/old copies/CinnamonCoffee - copy.cs': b'nested legacy copy',
         'scripts/old copies/CINNAMONCOFFEE.DLL': b'compiled legacy copy',
         'scripts/other/CinnamonCoffee.vb': b'legacy vb script',
+        'scripts/archive/Copy of old coffee.cs': b'namespace CinnamonCoffee\n{\n public class CinnamonCoffee : Script { }\n}\n',
+        'scripts/archive/renamed.cs': b'namespace CinnamonCoffee\n{\n public sealed class CinnamonCoffee : GTA.Script { }\n}\n',
     }
     preserved = {
         'scripts/CinnamonCoffee.cfg': b'partnerVoice=custom-user-setting\ndeviceToken=private-value-must-stay\n',
         'scripts/CinnamonCoffeeALife.ini': b'unique A-Life save',
         'scripts/CinnamonCoffeeSounds/BJSuck_1.wav': b'existing custom sound',
-        'scripts/OtherMod.cs': b'another mod must remain',
+        'scripts/OtherMod.cs': b'// namespace CinnamonCoffee\n// public class CinnamonCoffee : Script\n// another mod mentioning CinnamonCoffee must remain',
         'scripts/other/Another.dll': b'another compiled mod must remain',
+        'scripts/other/RenamedAssembly.dll': b'namespace CinnamonCoffee\npublic class CinnamonCoffee : Script\n(binary matching is deliberately not attempted)',
     }
     for name, data in {**old, **preserved}.items():
         write(game, name, data)
@@ -84,6 +87,8 @@ with tempfile.TemporaryDirectory(prefix='cinnamon-installer-') as directory:
     check(len(active) == 1 and active[0].name == 'CinnamonCoffee.3.cs', 'exactly one active mod script remains')
     source = (ROOT / 'Mod/scripts/CinnamonCoffee.3.cs').read_bytes()
     check(active[0].read_bytes() == source, 'installed source matches release byte-for-byte')
+    check(not (game / 'scripts/archive/Copy of old coffee.cs').exists(), 'renamed source is removed from active scripts tree')
+    check(not (game / 'scripts/archive/renamed.cs').exists(), 'renamed qualified GTA.Script source is removed from active scripts tree')
     backups = list((game / 'CinnamonCoffee-backups').iterdir())
     check(len(backups) == 1, 'one backup directory created outside scripts')
     for name, data in old.items():
@@ -153,4 +158,10 @@ with tempfile.TemporaryDirectory(prefix='cinnamon-installer-') as directory:
     check((packaged / 'scripts/CinnamonCoffee.3.cs').read_bytes() == source, 'package extracted directly into game folder installs successfully')
     check((packaged / 'scripts/CinnamonCoffee.cfg').read_bytes() == cfg_before, 'in-place source cfg preserved')
 
-print(f'PASS: {checks} actual PowerShell installer assertions (temporary fake game folders, no GTA V runtime).')
+launcher = (ROOT / 'scripts/Install-CinnamonCoffee.cmd').read_text()
+check('-File "%~dp0Install-CinnamonCoffee.ps1"' in launcher, 'CMD launcher resolves PS1 beside itself, independent of current working directory')
+check('-GameFolder "%gameFolder%"' in launcher and 'DisableDelayedExpansion' in launcher,
+      'CMD launcher quotes the game folder and preserves literal exclamation marks')
+check('set "installExit=%ERRORLEVEL%"' in launcher and 'exit /b %installExit%' in launcher,
+      'CMD launcher preserves the PowerShell exit code')
+print(f'PASS: {checks} installer checks (actual PowerShell on temporary fake games; CMD launcher wiring checked statically, no GTA runtime).')

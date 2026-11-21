@@ -1,4 +1,4 @@
-# CinnamonCoffee 1.4 — menu zakończenia i ustawiana przerwa dialogowa
+# CinnamonCoffee 1.5 — czytelne menu i poprawione odstępy dialogów
 
 Wersja przygotowana na podstawie przesłanego kodu CinnamonCoffee. Zawiera
 8 istniejących kobiecych głosów postaci `S_F_Y_HOOKER` z GTA V oraz 31 przesłanych
@@ -6,10 +6,39 @@ plików WAV. Nagrania pozostają niezmienione; nie dodano nowych głosów AI.
 
 ## Pobieranie
 
-Gotowa paczka instalacyjna: [CinnamonCoffee-voice-fix-1.4.zip](releases/CinnamonCoffee-voice-fix-1.4.zip).
+Gotowa paczka instalacyjna: [CinnamonCoffee-voice-fix-1.5.zip](releases/CinnamonCoffee-voice-fix-1.5.zip).
 Na stronie pliku ZIP wybierz **Download raw file**, aby pobrać archiwum.
 
-## Zmiany w 1.4
+## Zmiany w 1.5
+
+- Wysokość wierszy menu i stopki uwzględnia rzeczywiste zawijanie tekstu przez
+  GTA, zamiast stałej wysokości i szacowania liczby znaków. Menu jest rysowane
+  najwyżej raz na klatkę, a otwarty panel ukrywa dolne podpowiedzi animacji.
+- Zaktualizowane kopie CinnamonCoffee współdzielą blokadę jednego uruchomienia
+  w procesie gry. Druga taka kopia nie uruchamia menu, odtwarzania ani sprzątania
+  zadań aktywnej kopii. Starsze wersje bez tej ochrony trzeba usunąć instalatorem.
+- Instalator rozpoznaje również kopie źródła C# ze zmienioną nazwą. Zachowuje
+  je w kopii zapasowej poza `scripts`; nie usuwa dowolnych, nierozpoznanych DLL.
+- Przytrzymanie J daje jedno otwarcie lub zamknięcie menu do następnego
+  zwolnienia i naciśnięcia klawisza.
+- Przerwa jest liczona od wykrytego końca poprzedniej wypowiedzi. Stałe ustawienia
+  nie dostają losowania 2–5 sekund ani obowiązkowego minimum 450 ms.
+  Przykładowo `0,5` ustawia termin kolejnej próby na koniec plus 500 ms.
+
+Odtwarzanie pozostaje zależne od silnika GTA. Termin żądania jest sprawdzany
+co klatkę; zaakceptowanie żądania i rzeczywisty początek dźwięku mogą nastąpić
+później. Okresowe kwestie używają `SPEECH_PARAMS_FORCE_NORMAL` po sprawdzeniu
+końca mowy, aby ograniczyć dodatkowe decyzje silnika o pominięciu dialogu.
+Pozostałe kwestie zachowują dotychczasowy parametr. Skrypt nie nakłada
+kolejnej kwestii na aktywną ani nie przycina nagrań,
+aby sztucznie osiągnąć zadany czas. Opóźnienia i odrzucone żądania można
+sprawdzić w `scripts/CinnamonCoffeeAudio.log`.
+
+Brak numeru wersji w nagłówku oznacza, że widoczne menu nie pochodzi z tej paczki.
+Po prawidłowej instalacji powinno być **CINNAMON COFFEE 1.5**. Zobacz instalację
+poniżej, szczególnie gdy stare menu nadal się nakłada.
+
+## Zachowane zmiany z 1.4
 
 ### J podczas animacji ulicznych
 
@@ -47,9 +76,10 @@ animacje nadal są obsługiwane, a J i nawigacja nie sterują równocześnie men
 Anulowanie zachowuje poprzednią wartość. Obsługiwany zakres to 0–2147483 sekund
 lub `-1`. Długie odstępy uwzględniają przepełnienie zegara gry.
 
-**0 sekund oznacza brak dodatkowej pauzy, nie nakładanie dialogów.** Pozostaje
-ochrona uruchamiania i około 450 ms potwierdzania końca mowy; gra może dodać
-własną zwłokę. Przy dłuższej przerwie ten czas jest w niej uwzględniony.
+**0 sekund oznacza brak dodatkowej pauzy, nie nakładanie dialogów.** Koniec
+mowy potwierdzany jest na kolejnej aktualizacji gry. Dla dodatnich stałych
+przerw potwierdzanie mieści się w ustawionym czasie; nie dodaje kolejnych 450 ms.
+Gra może odrzucić lub opóźnić żądanie, co jest zapisywane diagnostycznie.
 Instalator zachowuje istniejącą konfigurację; nowy klucz zostanie dopisany
 po zapisaniu ustawienia w menu. HazelnutCoffee i VanillaCoffee nie są integrowane
 w tym wydaniu — zakres ograniczono do dwóch uzgodnionych poprawek.
@@ -92,16 +122,16 @@ moduł kończy występ zamiast bez końca przejmować zadania postaci.
 - Menu wyboru głosu można otworzyć podczas trwającej pętli animacji. Animacja
   kontynuuje działanie z dotychczasową szybkością.
 - **Partner Voice** ma bezpośrednią pozycję w menu głównym i pozostaje także
-  w **Settings**. Menu pokazuje osiem głosów i numer wersji **1.4**.
+  w **Settings**. Menu pokazuje osiem głosów i numer wersji **1.5**.
 - Zmiana głosu czeka na naturalny koniec bieżącej wypowiedzi. Kilka kolejnych
   wyborów zastępuje oczekujący wybór; obowiązuje ostatni.
 - Wybrany bank jest przekazywany bezpośrednio przy rozpoczynaniu każdej kwestii.
   Odczyt hasha ambientowego głosu jest wyłącznie diagnostyczny: najwyżej trzy
   próby i brak blokowania dialogów, nawet gdy silnik nie potwierdzi zmiany.
 - Nowa kwestia nie zatrzymuje poprzedniej przy wyższym tempie. Skrypt sprawdza
-  rzeczywiste odtwarzanie mowy, ochronę uruchamiania i 450 ms ciągłej ciszy.
+  rzeczywiste odtwarzanie mowy i potwierdzenie jej zakończenia.
   Następna kwestia otrzymuje ustawioną przerwę, domyślnie losową **2–5 sekund**,
-  liczoną od końca poprzedniej. Prędkość animacji nie skraca nagrania. Wywołania nie używają FORCE.
+  liczoną od końca poprzedniej. Prędkość animacji nie skraca nagrania.
 - Skrypt odróżnia żądanie mowy od potwierdzonego rozpoczęcia. Odrzucone żądanie
   dostaje krótką próbę ponowienia; nie jest uznawane za ukończoną wypowiedź.
   Przywrócono flagę audio Director Mode na czas interakcji, aby unikać dodatkowych
@@ -128,8 +158,10 @@ moduł kończy występ zamiast bez końca przejmować zadania postaci.
 ## Instalacja
 
 1. Zamknij grę. Wypakuj paczkę do osobnego folderu, np. na pulpicie.
-2. W PowerShell uruchom instalator z wypakowanego folderu, podając prawdziwą
-   lokalizację swojej gry:
+2. Uruchom **Install-CinnamonCoffee.cmd** z wypakowanego folderu. Domyślna
+   ścieżka to `D:\Steam\steamapps\common\Grand Theft Auto V`, jeżeli zawiera grę;
+   w przeciwnym razie instalator poprosi o folder. Sprawdź wyświetloną ścieżkę.
+   Alternatywnie otwórz PowerShell w wypakowanym folderze i uruchom:
 
    ```powershell
    powershell -NoProfile -ExecutionPolicy Bypass -File .\Install-CinnamonCoffee.ps1 -GameFolder "D:\Steam\steamapps\common\Grand Theft Auto V"
@@ -138,13 +170,16 @@ moduł kończy występ zamiast bez końca przejmować zadania postaci.
    Opcja `-ExecutionPolicy Bypass` dotyczy tylko tego uruchomienia PowerShell.
    Możesz najpierw dodać `-WhatIf`, aby wyświetlić plan bez zmieniania plików.
 3. Instalator przenosi stare `CinnamonCoffee*.cs`, `.vb` i `.dll`, także z podfolderów,
+   oraz pliki C# zawierające klasę CinnamonCoffee mimo zmienionej nazwy,
    do kopii zapasowej **poza** `scripts`, a następnie zostawia jeden aktualny
    `CinnamonCoffee.3.cs`. Zachowuje istniejącą konfigurację, A-Life i WAV-y.
    Kopie wewnątrz podfolderu `scripts` mogą nadal być uruchamiane przez SHVDN.
 4. Wymagane są ScriptHookV i ScriptHookVDotNet v3 zgodne z Twoją wersją GTA V.
-   Po uruchomieniu w nagłówku menu powinno być **CINNAMON COFFEE 1.4**.
+   Po uruchomieniu w nagłówku menu powinno być **CINNAMON COFFEE 1.5**.
    Jeżeli nadal widzisz stare podpowiedzi w jednym wierszu lub dwie nakładki,
-   sprawdź, czy instalator wskazywał właściwy folder gry.
+   sprawdź, czy instalator wskazywał właściwy folder gry. Wyłącz i uruchom GTA
+   ponownie; samo podmienienie pliku podczas gry nie wyładuje starej kopii.
+   Nowa wersja zapisuje swój start w `scripts/CinnamonCoffeeStartup.log`.
 
 Instalacja ręczna: przenieś wszystkie poprzednie kopie skryptu/DLL poza `scripts`,
 skopiuj aktualny `scripts/CinnamonCoffee.3.cs` i zachowaj własne cfg, A-Life oraz
@@ -183,8 +218,11 @@ python3 tests/verify_partner_audio.py /ścieżka/do/dotnet
 python3 tests/verify_menu_rendering.py /ścieżka/do/dotnet
 python3 tests/verify_wave_engine.py /ścieżka/do/dotnet
 python3 tests/verify_finish_flow.py
+python3 tests/verify_master_input.py /ścieżka/do/dotnet
 python3 tests/verify_street_finish_guard.py Mod/scripts/CinnamonCoffee.3.cs /ścieżka/do/dotnet
 python3 tests/verify_speech_gap.py /ścieżka/do/dotnet
+python3 tests/verify_speech_pacing.py /ścieżka/do/dotnet
+python3 tests/verify_single_instance.py /ścieżka/do/dotnet
 python3 tests/verify_club_dance.py /ścieżka/do/dotnet
 python3 tests/verify_installer.py /ścieżka/do/pwsh
 python3 scripts/build_release.py
@@ -194,6 +232,12 @@ Testy wymagają .NET 8 SDK, Pythona 3 i PowerShell do sprawdzania instalatora.
 Testy renderowania przechwytują rzeczywiste wywołania rysujące z kodu;
 testy audio symulują opóźniony i odrzucony start, stały błędny hash głosu,
 krótkie przerwy w sygnale i losowanie odstępu raz po faktycznym końcu kwestii.
+Testy stałych przerw używają rzeczywistej metody wywołującej mowę i oddzielają
+termin żądania od potwierdzonego startu. Model decyzji silnika jest symulacją;
+nie dowodzi, że GTA zaakceptuje każdy parametr lub zachowa identyczną latencję.
+Testy blokady uruchomienia obejmują osobno skompilowane kopie, wyścig o właściciela
+i zwalnianie z innego wątku. Na Linuksie używają blokady pliku; nazwany semafor
+Windows i sam launcher CMD wymagają sprawdzenia na Windows.
 Testy `waveOut` sprawdzają parser PCM, nakładanie pełnych klipów oraz czas życia
 buforów i sprzątanie urządzeń za pomocą symulowanego sterownika.
 Instalator sprawdzono na tymczasowych katalogach w PowerShell 7.4.6;

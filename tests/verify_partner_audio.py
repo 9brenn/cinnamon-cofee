@@ -74,7 +74,7 @@ namespace GTA { enum Control { FrontendY } }
 class Model { public int Hash; }
 class Ped {
     public int Handle; public bool Valid = true; public Model Model = new Model();
-    public string Voice = ""; public int SpeakingUntil, VisibleFrom;
+    public string Voice = ""; public int SpeakingUntil, VisibleFrom, ScriptedUntil;
     public bool Exists() { return Valid; }
 }
 static class Game {
@@ -125,6 +125,7 @@ static class Function {
         if (native == Hash.GET_HASH_KEY) {
             uint hash = Key((string)args[0]); value = typeof(T) == typeof(uint) ? (object)hash : (object)unchecked((int)hash);
         } else if ((ulong)native == 0x5E203DA2BA15D436UL) value = Key(WrongVoiceHash ? "UNRELIABLE_READBACK" : ((Ped)args[0]).Voice);
+        else if ((ulong)native == 0xCC9AA18DCC7084F4UL) value=Game.GameTime<((Ped)args[0]).ScriptedUntil;
         else if ((ulong)native == 0x729072355FA39EC9UL || (ulong)native == 0x9072C8B49907BFADUL) {
             Ped ped=(Ped)args[0]; value=((ulong)native==0x729072355FA39EC9UL && AnySpeechAlways) || (Game.GameTime>=ped.VisibleFrom && Game.GameTime<ped.SpeakingUntil && !(Game.GameTime>=FalseFrom && Game.GameTime<FalseUntil));
         } else if (native == Hash.IS_DISABLED_CONTROL_PRESSED) value=(int)args[1]==1 ? Modifier : MasterControl;
@@ -194,6 +195,7 @@ class Harness {
     private void SaveALife() { aLifeSaved++; }
     private void ShowHudStatus(string text,int time) { hud=text; }
     private void DrawSectionHeader(string text,float x,ref float y) { }
+    private void DrawMenuInfo(string text,float x,ref float y,float lh,float scale,int r,int g,int b) { }
     private void DrawMenuText(string text,float x,float y,float w,float size,bool center,int r,int g,int b,int a) { }
     private void DrawMenuItem(string text,int index,float x,ref float y,float lh,float scale=0.31f) { }
 '''
@@ -247,7 +249,7 @@ tests = r'''
             Check(gap>=2000 && gap<=5050,"observed post-line gap remains2–5seconds independent of speed");
         }
         Check(h.rng.GapDraws==2,"exactly one randomized gap is drawn for each completed accepted line");
-        Check(Function.SpeechParameters.Count>0 && Function.SpeechParameters.TrueForAll(v=>v=="SPEECH_PARAMS_ALLOW_REPEAT"),"native requests use non-forcing repeat parameters");
+        Check(Function.SpeechParameters.Count>0 && Function.SpeechParameters.TrueForAll(v=>v=="SPEECH_PARAMS_FORCE_NORMAL"),"idle loop requests use force-normal without interrupt parameters");
 
         h=New();h.PlayPedSpeech(h.girl,"GENERIC_HI");Run(h,1050,7000,false);
         int savedDue=h._nextPartnerLoopSpeechAt;int savedDraws=h.rng.GapDraws;
